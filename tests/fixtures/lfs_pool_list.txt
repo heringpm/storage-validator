@@ -1,0 +1,3 @@
+Pools from scratch:
+scratch.flash
+scratch.archive

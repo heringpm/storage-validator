@@ -1,0 +1,76 @@
+# storage-validator
+
+A single-node CLI that validates a Lustre filesystem: it discovers the
+topology (MDTs, OSTs, pools, client mounts), runs health checks, runs basic
+per-OST throughput/latency perf checks, and emits a console report plus an
+optional JSON report.
+
+Storage backend logic sits behind an abstract `StorageBackend` interface
+(`storage_validator.backends.base`), so additional filesystems (e.g. GPFS)
+can be added later without touching the CLI, engine, or reporting code.
+
+## Installation
+
+```
+pip install -e .[dev]
+```
+
+Requires Python >= 3.9, and the `lfs`/`lctl` Lustre client tools available on
+`PATH` for the `lustre` backend.
+
+## Usage
+
+Run a full validation (discovery + health + perf) against the local Lustre
+client, printing a console report:
+
+```
+storage-validator
+```
+
+Skip the perf checks (discovery + health only):
+
+```
+storage-validator --skip-perf
+```
+
+Write a JSON report in addition to (or instead of) the console table:
+
+```
+storage-validator --json report.json
+storage-validator --quiet --json report.json
+```
+
+Tune thresholds:
+
+```
+storage-validator --warn-pct 75 --fail-pct 90 \
+    --warn-mbps 300 --fail-mbps 100 \
+    --warn-ms 5 --fail-ms 25
+```
+
+Point perf checks at a specific client mount (autodetected from `/proc/mounts`
+otherwise):
+
+```
+storage-validator --mount-path /mnt/scratch --size-mb 512
+```
+
+The process exit code reflects the overall report status: `0` = PASS,
+`1` = WARN, `2` = FAIL.
+
+## Running tests
+
+```
+pytest
+```
+
+## Future work
+
+- Multi-client support: aggregate discovery/health/perf results across
+  several client nodes instead of a single local node.
+- GPFS backend: implement `StorageBackend` for GPFS (`mmlsfs`, `mmdf`,
+  `mmgetstate`, etc.) alongside the existing Lustre backend.
+- Daemon mode: run validation on a schedule and expose results via an
+  API/metrics endpoint instead of a one-shot CLI invocation.
+- Richer perf checks: `fio`-based IOPS/latency percentiles, concurrent
+  multi-OST throughput aggregation.

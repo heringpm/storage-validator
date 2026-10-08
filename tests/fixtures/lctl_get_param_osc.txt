@@ -1,0 +1,4 @@
+osc.scratch-OST0000-osc-MDT0000.ost_server_uuid=scratch-OST0000_UUID
+osc.scratch-OST0000-osc-MDT0000.ost_conn_uuid=10.0.0.10@tcp
+osc.scratch-OST0001-osc-MDT0000.ost_server_uuid=scratch-OST0001_UUID
+osc.scratch-OST0001-osc-MDT0000.ost_conn_uuid=10.0.0.11@tcp

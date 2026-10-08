@@ -1,0 +1,7 @@
+UUID                       bytes        Used   Available Use% Mounted on
+scratch-MDT0000_UUID       100.0G       10.0G       85.0G  10% /mnt/scratch[MDT:0]
+scratch-OST0000_UUID       500.0G      100.0G      380.0G  20% /mnt/scratch[OST:0]
+scratch-OST0001_UUID       500.0G      475.0G       10.0G  95% /mnt/scratch[OST:1]
+scratch-OST0002_UUID       500.0G      300.0G      190.0G  60% /mnt/scratch[OST:2]
+
+filesystem_summary:       1100.0G      875.0G      190.0G  80% /mnt/scratch

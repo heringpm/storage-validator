@@ -1,0 +1,9 @@
+  0 UP mgc MGC10.0.0.1@tcp 9dd3c4a8-1111-2222-3333-444455556666 5
+  1 UP mdt scratch-MDT0000 scratch-MDT0000_UUID 5
+  2 UP lov scratch-clilov-ffff8800 scratch-clilov-ffff8800_UUID 4
+  3 UP osc scratch-OST0000-osc-MDT0000 scratch-OST0000-osc-MDT0000_UUID 5
+  4 UP osc scratch-OST0001-osc-MDT0000 scratch-OST0001-osc-MDT0000_UUID 5
+  5 UP obdfilter scratch-OST0000 scratch-OST0000_UUID 7
+  6 IN obdfilter scratch-OST0001 scratch-OST0001_UUID 7
+this line is garbage and should be skipped
+  7 UP obdfilter scratch-OST0002 scratch-OST0002_UUID 7
