@@ -17,9 +17,26 @@ from . import shell
 log = logging.getLogger(__name__)
 
 # e.g. "  5 UP obdfilter scratch-OST0000 scratch-OST0000_UUID 7"
+# (seen when running on a Lustre server / MDS/OSS node)
 _DL_LINE_RE = re.compile(
     r"^\s*\d+\s+(?P<state>\S+)\s+(?P<type>mdt|obdfilter)\s+"
     r"(?P<name>\S+)\s+(?P<uuid>\S+)\s+\d+\s*$"
+)
+
+# e.g. "  4 UP mdc x3e09-MDT0003-mdc-ff3b05dfcf9f9800 9d0db091-... 4"
+#      "  9 UP osc x3e09-OST0003-osc-ff3b05dfcf9f9800 9d0db091-... 4"
+# (seen when running on a Lustre client node; the uuid column here is the
+# *client's* connection uuid, shared across all devices, not the target's
+# own uuid, so we derive a target uuid from its name instead.)
+_DL_CLIENT_LINE_RE = re.compile(
+    r"^\s*\d+\s+(?P<state>\S+)\s+(?P<type>mdc|osc)\s+"
+    r"(?P<devname>\S+)\s+\S+\s+\d+\s*$"
+)
+
+# e.g. "  1 UP lov x3e09-clilov-ff3b05dfcf9f9800 ... 3"
+#      "  2 UP lmv x3e09-clilmv-ff3b05dfcf9f9800 ... 4"
+_DL_CLIENT_FSNAME_RE = re.compile(
+    r"^\s*\d+\s+\S+\s+(?:lov|lmv)\s+(?P<name>\S+)\s+\S+\s+\d+\s*$"
 )
 
 # e.g. "0: scratch-OST0000_UUID ACTIVE"
@@ -35,7 +52,12 @@ _POOL_LINE_RE = re.compile(r"^(?P<fsname>[\w-]+)\.(?P<pool>[\w-]+)\s*$")
 
 
 def discover_fsname(timeout: float = 30) -> str:
-    """Determine the Lustre filesystem name from mdt fsname param."""
+    """Determine the Lustre filesystem name.
+
+    Tries the `mdt.*.fsname` param first (only available on MDS/server
+    nodes), then falls back to deriving it from the client-side `lov`/`lmv`
+    device name reported by `lctl dl` (e.g. "x3e09-clilov-..." -> "x3e09").
+    """
     result = shell.run_cmd(
         ["lctl", "get_param", "-n", "mdt.*.fsname"], timeout=timeout
     )
@@ -43,31 +65,62 @@ def discover_fsname(timeout: float = 30) -> str:
         line = line.strip()
         if line:
             return line
+
+    dl_result = shell.run_cmd(["lctl", "dl"], timeout=timeout)
+    for line in dl_result.stdout.splitlines():
+        match = _DL_CLIENT_FSNAME_RE.match(line)
+        if not match:
+            continue
+        name = match.group("name")
+        for sep in ("-clilov-", "-clilmv-"):
+            if sep in name:
+                return name.split(sep)[0]
+
     log.warning("could not determine fsname from lctl get_param output")
     return "unknown"
 
 
 def discover_targets(timeout: float = 30) -> list[Target]:
-    """Parse `lctl dl` output into MDT/OST Target objects."""
+    """Parse `lctl dl` output into MDT/OST Target objects.
+
+    Supports both server-side device lines (`mdt`/`obdfilter`, seen on
+    MDS/OSS nodes) and client-side device lines (`mdc`/`osc`, seen on
+    client nodes).
+    """
     result = shell.run_cmd(["lctl", "dl"], timeout=timeout)
-    targets: list[Target] = []
+    targets_by_name: dict[str, Target] = {}
     for line in result.stdout.splitlines():
         match = _DL_LINE_RE.match(line)
-        if not match:
-            if line.strip():
-                log.warning("skipping unparsed `lctl dl` line: %r", line)
-            continue
-        type_ = match.group("type")
-        kind = "mdt" if type_ == "mdt" else "ost"
-        targets.append(
-            Target(
-                name=match.group("name"),
+        if match:
+            # Server-side device line (mdt/obdfilter): authoritative, always
+            # wins over any client-side (mdc/osc) line for the same target
+            # (e.g. an MDS also has `osc` connections to remote OSTs).
+            type_ = match.group("type")
+            kind = "mdt" if type_ == "mdt" else "ost"
+            name = match.group("name")
+            targets_by_name[name] = Target(
+                name=name,
                 kind=kind,
                 uuid=match.group("uuid"),
                 state=match.group("state"),
             )
-        )
-    return targets
+            continue
+        match = _DL_CLIENT_LINE_RE.match(line)
+        if match:
+            type_ = match.group("type")
+            kind = "mdt" if type_ == "mdc" else "ost"
+            name = match.group("devname").split(f"-{type_}-")[0]
+            if name not in targets_by_name:
+                targets_by_name[name] = Target(
+                    name=name,
+                    kind=kind,
+                    uuid=f"{name}_UUID",
+                    state=match.group("state"),
+                )
+            continue
+        if line.strip():
+            log.warning("skipping unparsed `lctl dl` line: %r", line)
+    return list(targets_by_name.values())
 
 
 def discover_ost_activation(timeout: float = 30) -> dict[str, str]:

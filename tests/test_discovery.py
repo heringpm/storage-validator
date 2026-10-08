@@ -35,6 +35,46 @@ def test_discover_targets(fixtures, make_result):
     assert inactive.state == "IN"
 
 
+def test_discover_targets_client_side(fixtures, make_result):
+    """On a client node, `lctl dl` reports mdc/osc devices instead of
+    mdt/obdfilter, and the uuid column is a shared client connection uuid
+    rather than the target's own uuid."""
+    raw = fixtures("lctl_dl_client.txt")
+    with patch(
+        "storage_validator.backends.lustre.discovery.shell.run_cmd",
+        return_value=make_result(raw),
+    ):
+        targets = discovery.discover_targets()
+
+    names = {t.name for t in targets}
+    assert names == {"x3e09-MDT0000", "x3e09-OST0000", "x3e09-OST0001"}
+    mdt = next(t for t in targets if t.name == "x3e09-MDT0000")
+    assert mdt.kind == "mdt"
+    assert mdt.uuid == "x3e09-MDT0000_UUID"
+    assert mdt.state == "UP"
+    inactive = next(t for t in targets if t.name == "x3e09-OST0001")
+    assert inactive.kind == "ost"
+    assert inactive.uuid == "x3e09-OST0001_UUID"
+    assert inactive.state == "IN"
+
+
+def test_discover_fsname_falls_back_to_client_lov(fixtures, make_result):
+    """When `mdt.*.fsname` yields nothing (client node), fall back to
+    deriving the fsname from the `lov`/`lmv` device name in `lctl dl`."""
+
+    def fake_run_cmd(cmd, timeout=30):
+        if cmd[:2] == ["lctl", "get_param"]:
+            return make_result("")
+        assert cmd == ["lctl", "dl"]
+        return make_result(fixtures("lctl_dl_client.txt"))
+
+    with patch(
+        "storage_validator.backends.lustre.discovery.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ):
+        assert discovery.discover_fsname() == "x3e09"
+
+
 def test_discover_ost_activation(fixtures, make_result):
     with patch(
         "storage_validator.backends.lustre.discovery.shell.run_cmd",

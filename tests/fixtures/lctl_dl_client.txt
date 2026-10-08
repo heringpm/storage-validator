@@ -1,0 +1,6 @@
+  0 UP mgc MGC172.16.130.90@o2ib 7dabb99c-00cd-43aa-b7aa-2abf169bb6fd 4
+  1 UP lov x3e09-clilov-ff3b05dfcf9f9800 9d0db091-4e4b-4969-800c-a7649a00a219 3
+  2 UP lmv x3e09-clilmv-ff3b05dfcf9f9800 9d0db091-4e4b-4969-800c-a7649a00a219 4
+  3 UP mdc x3e09-MDT0000-mdc-ff3b05dfcf9f9800 9d0db091-4e4b-4969-800c-a7649a00a219 4
+  4 UP osc x3e09-OST0000-osc-ff3b05dfcf9f9800 9d0db091-4e4b-4969-800c-a7649a00a219 4
+  5 IN osc x3e09-OST0001-osc-ff3b05dfcf9f9800 9d0db091-4e4b-4969-800c-a7649a00a219 4
