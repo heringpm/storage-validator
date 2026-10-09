@@ -75,6 +75,16 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
     show_default=True,
     help="Path to the elbencho binary used for perf checks, if not on PATH.",
 )
+@click.option(
+    "--perf-threads",
+    default=None,
+    type=int,
+    help=(
+        "elbencho worker thread count per test file, used for both the "
+        "per-OST and per-pool (per-OST-file) perf checks. Defaults to the "
+        "host's total CPU thread count (from `lscpu`)."
+    ),
+)
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress the console table output.")
 def main(
@@ -92,6 +102,7 @@ def main(
     pool_thresholds: tuple[str, ...],
     pool_size_mb_per_ost: int | None,
     elbencho_path: str,
+    perf_threads: int | None,
     json_path: str | None,
     quiet: bool,
 ) -> None:
@@ -112,6 +123,7 @@ def main(
             pool_thresholds=parsed_pool_thresholds,
             pool_size_mb_per_ost=pool_size_mb_per_ost,
             elbencho_path=elbencho_path,
+            perf_threads=perf_threads,
         ),
     )
 

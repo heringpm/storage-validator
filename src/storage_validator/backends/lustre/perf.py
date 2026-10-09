@@ -52,6 +52,24 @@ _UNIT_TO_MBPS = {
 }
 
 
+def detect_cpu_thread_count() -> int:
+    """Total CPU threads on this host, used as the default elbencho worker
+    thread count for perf checks when `--perf-threads` isn't given.
+
+    Parses the "CPU(s):" line from `lscpu`; falls back to `os.cpu_count()`
+    (and then 1) if `lscpu` is unavailable or its output can't be parsed.
+    """
+    try:
+        result = shell.run_cmd(["lscpu"], timeout=5)
+        if result.ok:
+            for line in result.stdout.splitlines():
+                if line.strip().startswith("CPU(s):"):
+                    return int(line.split(":", 1)[1].strip())
+    except (shell.CommandError, ValueError):
+        pass
+    return os.cpu_count() or 1
+
+
 def ost_index(target: Target) -> int | None:
     """Extract the numeric OST index from a target name like `fs-OST0003`."""
     match = _OST_INDEX_RE.search(target.name)
@@ -80,10 +98,13 @@ def throughput_check(
     warn_mbps: float = DEFAULT_WARN_MBPS,
     fail_mbps: float = DEFAULT_FAIL_MBPS,
     elbencho_path: str = "elbencho",
+    threads: int | None = None,
 ) -> PerfResult:
     """Write `size_mb` MiB directly to `target`'s OST and measure throughput
-    using `elbencho` (single worker thread, single-striped onto this OST).
+    using `elbencho` (single-striped onto this OST, driven by `threads`
+    worker threads; defaults to the host's total CPU thread count).
     """
+    threads = threads or detect_cpu_thread_count()
     idx = ost_index(target)
     if idx is None:
         return PerfResult(
@@ -115,7 +136,7 @@ def throughput_check(
 
         result = shell.run_cmd(
             [
-                elbencho_path, "-w", "-t", "1", "-b", "1m",
+                elbencho_path, "-w", "-t", str(threads), "-b", "1m",
                 "-s", f"{size_mb}m", "--direct",
                 "--csvfile", csv_path, path,
             ],
@@ -169,10 +190,14 @@ def latency_check(
     warn_ms: float = DEFAULT_WARN_MS,
     fail_ms: float = DEFAULT_FAIL_MS,
     elbencho_path: str = "elbencho",
+    threads: int | None = None,
 ) -> PerfResult:
-    """Measure single 4K direct-write latency on `target`'s OST using
-    `elbencho` (single worker thread, single-striped onto this OST).
+    """Measure 4K direct-write latency on `target`'s OST using `elbencho`
+    (single-striped onto this OST, driven by `threads` worker threads;
+    defaults to the host's total CPU thread count). The worst latency across
+    all threads is reported.
     """
+    threads = threads or detect_cpu_thread_count()
     idx = ost_index(target)
     if idx is None:
         return PerfResult(
@@ -197,7 +222,7 @@ def latency_check(
 
         result = shell.run_cmd(
             [
-                elbencho_path, "-w", "-t", "1", "-b", "4k",
+                elbencho_path, "-w", "-t", str(threads), "-b", "4k",
                 "-s", "4k", "--direct",
                 "--csvfile", csv_path, path,
             ],
@@ -322,18 +347,19 @@ def pool_throughput_check(
     warn_mbps: float = DEFAULT_WARN_MBPS,
     fail_mbps: float = DEFAULT_FAIL_MBPS,
     elbencho_path: str = "elbencho",
+    threads_per_ost: int | None = None,
 ) -> PerfResult:
     """Measure real aggregate throughput across every OST in a pool using
     `elbencho`.
 
     Each OST gets its own scratch file single-striped onto it (`lfs
-    setstripe -i <idx> -c 1`), then `elbencho` is run once with one worker
-    thread per file (`-t <stripe_count>`), so every OST is driven
-    concurrently by a real multi-threaded writer instead of a single `dd`
-    process. The reported aggregate MiB/s ("MiB/s [last]" in elbencho's
-    output, i.e. the aggregate rate once the slowest/last thread finishes)
-    is used as the pool's throughput — not an average of independent
-    single-OST results.
+    setstripe -i <idx> -c 1`), then `elbencho` is run once with
+    `threads_per_ost` worker threads per file (defaulting to the host's
+    total CPU thread count), so every OST is driven concurrently by a real
+    multi-threaded writer instead of a single `dd` process. The reported
+    aggregate MiB/s ("MiB/s [last]" in elbencho's output, i.e. the aggregate
+    rate once the slowest/last thread finishes) is used as the pool's
+    throughput — not an average of independent single-OST results.
     """
     indices = _group_ost_indices(targets)
     if not indices:
@@ -342,7 +368,9 @@ def pool_throughput_check(
             "could not determine any OST indices in pool",
         )
 
+    threads_per_ost = threads_per_ost or detect_cpu_thread_count()
     stripe_count = len(indices)
+    total_threads = threads_per_ost * stripe_count
     paths = _pool_ost_paths(pool_label, indices, mount_path, "perf")
     csv_fd, csv_path = tempfile.mkstemp(prefix="storage_validator_elbencho_", suffix=".csv")
     os.close(csv_fd)
@@ -354,7 +382,7 @@ def pool_throughput_check(
 
         result = shell.run_cmd(
             [
-                elbencho_path, "-w", "-t", str(stripe_count), "-b", "1m",
+                elbencho_path, "-w", "-t", str(total_threads), "-b", "1m",
                 "-s", f"{size_mb_per_ost}m", "--direct",
                 "--csvfile", csv_path,
             ] + paths,
@@ -375,7 +403,10 @@ def pool_throughput_check(
         rate = float(row["MiB/s [last]"])
 
         total_mb = stripe_count * size_mb_per_ost
-        detail = f"{stripe_count} OSTs, {total_mb} MiB via elbencho ({stripe_count} threads)"
+        detail = (
+            f"{stripe_count} OSTs, {total_mb} MiB via elbencho "
+            f"({total_threads} threads, {threads_per_ost}/OST)"
+        )
         if rate < fail_mbps:
             status = "FAIL"
             msg = f"{rate:.1f} MB/s aggregate below fail threshold {fail_mbps} ({detail})"
@@ -412,16 +443,18 @@ def pool_latency_check(
     warn_ms: float = DEFAULT_WARN_MS,
     fail_ms: float = DEFAULT_FAIL_MS,
     elbencho_path: str = "elbencho",
+    threads_per_ost: int | None = None,
 ) -> PerfResult:
     """Measure worst-case write latency across a pool under concurrent load
     using `elbencho`.
 
     Each OST gets its own scratch file (same per-OST striping as
-    `pool_throughput_check`), and `elbencho` issues one small 4K direct write
-    per OST concurrently (`-t <stripe_count>`, `-b 4k -s 4k`). The reported
-    max IO latency ("IO lat us [max]") across all worker threads is used as
-    the pool's latency, since that tail latency is what a client actually
-    experiences when an I/O touches every stripe of a wide file.
+    `pool_throughput_check`), and `elbencho` issues small 4K direct writes
+    per OST concurrently (`threads_per_ost` worker threads per file,
+    defaulting to the host's total CPU thread count; `-b 4k -s 4k`). The
+    reported max IO latency ("IO lat us [max]") across all worker threads is
+    used as the pool's latency, since that tail latency is what a client
+    actually experiences when an I/O touches every stripe of a wide file.
     """
     indices = _group_ost_indices(targets)
     if not indices:
@@ -430,7 +463,9 @@ def pool_latency_check(
             "could not determine any OST indices in pool",
         )
 
+    threads_per_ost = threads_per_ost or detect_cpu_thread_count()
     stripe_count = len(indices)
+    total_threads = threads_per_ost * stripe_count
     paths = _pool_ost_paths(pool_label, indices, mount_path, "lat")
     csv_fd, csv_path = tempfile.mkstemp(prefix="storage_validator_elbencho_", suffix=".csv")
     os.close(csv_fd)
@@ -442,7 +477,7 @@ def pool_latency_check(
 
         result = shell.run_cmd(
             [
-                elbencho_path, "-w", "-t", str(stripe_count), "-b", "4k",
+                elbencho_path, "-w", "-t", str(total_threads), "-b", "4k",
                 "-s", "4k", "--direct",
                 "--csvfile", csv_path,
             ] + paths,
@@ -462,7 +497,10 @@ def pool_latency_check(
             )
         worst_ms = float(row["IO lat us [max]"]) / 1000.0
 
-        detail = f"worst of {stripe_count} concurrent OST writes via elbencho"
+        detail = (
+            f"worst of {total_threads} concurrent writes via elbencho "
+            f"({stripe_count} OSTs, {threads_per_ost}/OST)"
+        )
         if worst_ms > fail_ms:
             status = "FAIL"
             msg = f"{worst_ms:.2f} ms above fail threshold {fail_ms} ({detail})"
@@ -499,19 +537,23 @@ def run_perf_checks(
     pool_thresholds: dict[str, PerfThresholds] | None = None,
     pool_size_mb_per_ost: int | None = None,
     elbencho_path: str = "elbencho",
+    threads: int | None = None,
 ) -> list[PerfResult]:
     """Run throughput + latency checks against every OST in the topology,
     then run one real aggregate throughput+latency test per OST pool (plus
     one for any OSTs that aren't in a pool) using `elbencho`: one
-    single-striped scratch file per OST, driven concurrently by one
-    elbencho worker thread per file, so the pool result reflects actual
+    single-striped scratch file per OST, driven concurrently by `threads`
+    elbencho worker threads per file, so the pool result reflects actual
     multi-threaded aggregate bandwidth/tail latency rather than an average
     of independent single-OST tests. Each pool's own thresholds are
     used so different drive types (e.g. ssd vs hdd pools) aren't judged
-    against the same bar.
+    against the same bar. `threads` defaults to the host's total CPU thread
+    count (detected once via `lscpu` and reused for every check) when not
+    given.
     """
     default_thresholds = default_thresholds or PerfThresholds()
     pool_size_mb_per_ost = pool_size_mb_per_ost or size_mb
+    threads = threads or detect_cpu_thread_count()
     results: list[PerfResult] = []
     groups: dict[str, list[Target]] = defaultdict(list)
     for target in topology.osts:
@@ -519,12 +561,12 @@ def run_perf_checks(
         t_result = throughput_check(
             target, mount_path, size_mb, timeout,
             warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
-            elbencho_path=elbencho_path,
+            elbencho_path=elbencho_path, threads=threads,
         )
         l_result = latency_check(
             target, mount_path, timeout=timeout,
             warn_ms=th.warn_ms, fail_ms=th.fail_ms,
-            elbencho_path=elbencho_path,
+            elbencho_path=elbencho_path, threads=threads,
         )
         t_result.pool = target.pool
         l_result.pool = target.pool
@@ -540,14 +582,14 @@ def run_perf_checks(
                 pool_label, group_targets, topology.fsname, mount_path,
                 size_mb_per_ost=pool_size_mb_per_ost, timeout=timeout,
                 warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
-                elbencho_path=elbencho_path,
+                elbencho_path=elbencho_path, threads_per_ost=threads,
             )
         )
         results.append(
             pool_latency_check(
                 pool_label, group_targets, topology.fsname, mount_path,
                 timeout=timeout, warn_ms=th.warn_ms, fail_ms=th.fail_ms,
-                elbencho_path=elbencho_path,
+                elbencho_path=elbencho_path, threads_per_ost=threads,
             )
         )
     return results

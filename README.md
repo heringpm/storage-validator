@@ -59,14 +59,25 @@ per-OST checks and the per-pool checks use
 instead of single-threaded `dd`. In addition to the per-OST checks,
 each pool gets a real multi-threaded aggregate test: one scratch file is
 single-striped onto each OST in the pool, then elbencho drives all of them
-concurrently with one worker thread per file, measuring true aggregate MB/s
-and worst-case tail latency across
+concurrently, measuring true aggregate MB/s and worst-case tail latency across
 the pool — not an average of the independent per-OST results:
 
 ```
 storage-validator \
     --pool-threshold flash:800:400:2:5 \
     --pool-threshold archive:100:20:20:80
+```
+
+By default each elbencho invocation uses the host's total CPU thread count
+(parsed from `lscpu`) as its worker thread count — for a per-OST check that
+means `N` threads driving the one scratch file on that OST, and for a
+per-pool check it means `N` threads per OST scratch file (so a pool with 4
+OSTs on a 16-thread host runs with 64 total worker threads). Override this
+with `--perf-threads` if you want a specific thread count instead (e.g. to
+match an expected client concurrency, or to avoid oversubscribing the host):
+
+```
+storage-validator --perf-threads 4
 ```
 
 Point perf checks at a specific client mount (autodetected from `/proc/mounts`

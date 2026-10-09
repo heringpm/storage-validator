@@ -98,6 +98,36 @@ def test_cli_parses_elbencho_path_option():
     assert captured["cfg"].perf.elbencho_path == "/opt/elbencho/bin/elbencho"
 
 
+def test_cli_parses_perf_threads_option():
+    runner = CliRunner()
+    captured = {}
+
+    def fake_run(cfg):
+        captured["cfg"] = cfg
+        return make_report()
+
+    with patch("storage_validator.cli.engine.run", side_effect=fake_run):
+        result = runner.invoke(
+            main, ["--skip-perf", "--quiet", "--perf-threads", "8"]
+        )
+    assert result.exit_code == 0
+    assert captured["cfg"].perf.perf_threads == 8
+
+
+def test_cli_defaults_perf_threads_to_none():
+    runner = CliRunner()
+    captured = {}
+
+    def fake_run(cfg):
+        captured["cfg"] = cfg
+        return make_report()
+
+    with patch("storage_validator.cli.engine.run", side_effect=fake_run):
+        result = runner.invoke(main, ["--skip-perf", "--quiet"])
+    assert result.exit_code == 0
+    assert captured["cfg"].perf.perf_threads is None
+
+
 def test_cli_rejects_malformed_pool_threshold():
     runner = CliRunner()
     with patch("storage_validator.cli.engine.run", return_value=make_report()):

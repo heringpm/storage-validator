@@ -49,6 +49,11 @@ class PerfConfig:
     # Path to the `elbencho` binary, used for both per-OST and per-pool perf
     # checks. Defaults to "elbencho" (resolved via PATH) when not set.
     elbencho_path: str = "elbencho"
+    # Worker thread count elbencho uses per test file, for both the per-OST
+    # tests (one file, this many threads) and the per-pool tests (each
+    # pool/OST file gets this many threads). None means auto-detect from the
+    # host's total CPU threads (via `lscpu`).
+    perf_threads: Optional[int] = None
 
     @property
     def default_thresholds(self) -> PerfThresholds:
