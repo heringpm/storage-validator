@@ -1,17 +1,18 @@
-"""Per-OST and per-pool throughput/latency perf checks using `lfs setstripe`
-+ `dd`.
+"""Per-OST and per-pool throughput/latency perf checks.
 
 Per-OST checks write a scratch file explicitly striped onto a single target
 OST (`lfs setstripe -i <index> -c 1`) and measure `dd`'s reported transfer
-rate (throughput) or per-write latency.
+rate (throughput) or per-write latency. `dd` is single-threaded, which is
+fine for a single-OST sanity check.
 
 Per-pool checks (`pool_throughput_check`/`pool_latency_check`) measure real
-aggregate performance: one file is striped across every OST in the pool
-(`lfs setstripe -p <pool>` or explicit `-o <indices>` for unpooled OSTs),
-then written concurrently with one `dd` process per stripe so every OST in
-the pool is driven at the same time. This is not an average of the
-independent per-OST results above — it's a distinct test that exercises
-real parallel/aggregate I/O across the pool.
+aggregate performance using `elbencho`, a multi-threaded benchmark tool: one
+scratch file is pre-striped onto each OST in the pool individually (`lfs
+setstripe -i <idx> -c 1`), then `elbencho` is run once with one worker thread
+per file, driving every OST in the pool concurrently. This is not an average
+of the independent per-OST `dd` results above — it's a distinct test that
+exercises real parallel/aggregate I/O across the pool using actual
+multi-threaded writers instead of a single `dd` process.
 
 All subprocess calls go through `shell.run_cmd` so they can be mocked in
 tests.
@@ -19,19 +20,17 @@ tests.
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
 import re
-import time
+import tempfile
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 
 from storage_validator.config import PerfThresholds
 from storage_validator.models import PerfResult, Target, Topology
 
 from . import shell
-
-MAX_POOL_WORKERS = 16
 
 log = logging.getLogger(__name__)
 
@@ -245,26 +244,47 @@ def _group_ost_indices(targets: list[Target]) -> list[int]:
     return sorted(indices)
 
 
-def _pool_setstripe_cmd(
-    pool_label: str, fsname: str, indices: list[int], path: str
-) -> list[str]:
-    """Stripe `path` across every OST index in this group.
+def _pool_fail(pool_label: str, kind: str, unit: str, message: str) -> PerfResult:
+    return PerfResult(
+        target=f"pool:{pool_label}", kind=kind, value=0.0, unit=unit,
+        status="FAIL", message=message,
+        pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
+    )
 
-    For a real Lustre OST pool, `-p <fsname>.<pool>` lets Lustre pick the
-    member OSTs. For the synthetic "(unpooled)" group (OSTs with no pool
-    membership), there is no pool name to pass, so the exact OST indices are
-    given explicitly via `-o`.
+
+def _pool_ost_paths(pool_label: str, indices: list[int], mount_path: str, suffix: str) -> list[str]:
+    """One dedicated scratch file per OST index, so each can be independently
+    single-striped onto its own OST and then driven by its own elbencho
+    worker thread.
     """
-    stripe_count = len(indices)
-    if pool_label != "(unpooled)":
-        return [
-            "lfs", "setstripe", "-p", f"{fsname}.{pool_label}",
-            "-c", str(stripe_count), path,
-        ]
     return [
-        "lfs", "setstripe", "-o", ",".join(str(i) for i in indices),
-        "-c", str(stripe_count), path,
+        os.path.join(mount_path, f".storage_validator_pool_{suffix}_{pool_label}_{idx}")
+        for idx in indices
     ]
+
+
+def _setstripe_per_ost(indices: list[int], paths: list[str], timeout: float) -> str | None:
+    """Single-stripe every path onto its matching OST index.
+
+    Returns an error message if any `lfs setstripe` call fails, else None.
+    """
+    for idx, path in zip(indices, paths):
+        result = shell.run_cmd(
+            ["lfs", "setstripe", "-i", str(idx), "-c", "1", path], timeout=timeout
+        )
+        if not result.ok:
+            return f"lfs setstripe failed for OST {idx}: {result.stderr.strip()}"
+    return None
+
+
+def _read_elbencho_csv_last_row(csv_path: str) -> dict[str, str] | None:
+    """Read the last row elbencho wrote to its `--csvfile` output."""
+    try:
+        with open(csv_path, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+    except OSError:
+        return None
+    return rows[-1] if rows else None
 
 
 def pool_throughput_check(
@@ -277,65 +297,59 @@ def pool_throughput_check(
     warn_mbps: float = DEFAULT_WARN_MBPS,
     fail_mbps: float = DEFAULT_FAIL_MBPS,
 ) -> PerfResult:
-    """Measure real aggregate throughput across every OST in a pool.
+    """Measure real aggregate throughput across every OST in a pool using
+    `elbencho`.
 
-    Writes ONE file striped across all of the pool's OSTs (`lfs setstripe
-    -c <stripe_count>`), then writes it with one concurrent `dd` process per
-    stripe (each targeting its own stripe-aligned byte range), so all OSTs
-    are driven at the same time. Aggregate MB/s is computed from total bytes
-    written / wall-clock time of the whole parallel batch — not an average
-    of independent single-OST results.
+    Each OST gets its own scratch file single-striped onto it (`lfs
+    setstripe -i <idx> -c 1`), then `elbencho` is run once with one worker
+    thread per file (`-t <stripe_count>`), so every OST is driven
+    concurrently by a real multi-threaded writer instead of a single `dd`
+    process. The reported aggregate MiB/s ("MiB/s [last]" in elbencho's
+    output, i.e. the aggregate rate once the slowest/last thread finishes)
+    is used as the pool's throughput — not an average of independent
+    single-OST results.
     """
     indices = _group_ost_indices(targets)
     if not indices:
-        return PerfResult(
-            target=f"pool:{pool_label}", kind="throughput", value=0.0, unit="MB/s",
-            status="FAIL", message="could not determine any OST indices in pool",
-            pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
+        return _pool_fail(
+            pool_label, "throughput", "MB/s",
+            "could not determine any OST indices in pool",
         )
 
     stripe_count = len(indices)
-    path = os.path.join(mount_path, f".storage_validator_pool_perf_{pool_label}")
+    paths = _pool_ost_paths(pool_label, indices, mount_path, "perf")
+    csv_fd, csv_path = tempfile.mkstemp(prefix="storage_validator_elbencho_", suffix=".csv")
+    os.close(csv_fd)
+    os.remove(csv_path)
     try:
-        setstripe = shell.run_cmd(
-            _pool_setstripe_cmd(pool_label, fsname, indices, path), timeout=timeout
+        err = _setstripe_per_ost(indices, paths, timeout)
+        if err:
+            return _pool_fail(pool_label, "throughput", "MB/s", err)
+
+        result = shell.run_cmd(
+            [
+                "elbencho", "-w", "-t", str(stripe_count), "-b", "1m",
+                "-s", f"{size_mb_per_ost}m", "--direct",
+                "--csvfile", csv_path,
+            ] + paths,
+            timeout=timeout,
         )
-        if not setstripe.ok:
-            return PerfResult(
-                target=f"pool:{pool_label}", kind="throughput", value=0.0, unit="MB/s",
-                status="FAIL", message=f"lfs setstripe failed: {setstripe.stderr.strip()}",
-                pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
+        if not result.ok:
+            return _pool_fail(
+                pool_label, "throughput", "MB/s",
+                f"elbencho failed: {(result.stderr or result.stdout).strip()}",
             )
 
-        def _write_stripe(i: int) -> shell.CommandResult:
-            return shell.run_cmd(
-                [
-                    "dd", "if=/dev/zero", f"of={path}", "bs=1M",
-                    f"count={size_mb_per_ost}", f"seek={i * size_mb_per_ost}",
-                    "oflag=direct", "conv=notrunc",
-                ],
-                timeout=timeout,
+        row = _read_elbencho_csv_last_row(csv_path)
+        if row is None or "MiB/s [last]" not in row:
+            return _pool_fail(
+                pool_label, "throughput", "MB/s",
+                "could not parse elbencho CSV output",
             )
-
-        workers = min(stripe_count, MAX_POOL_WORKERS)
-        start = time.monotonic()
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            dd_results = list(pool.map(_write_stripe, range(stripe_count)))
-        elapsed = max(time.monotonic() - start, 1e-6)
-
-        failed = [r for r in dd_results if not r.ok]
-        if failed:
-            return PerfResult(
-                target=f"pool:{pool_label}", kind="throughput", value=0.0, unit="MB/s",
-                status="FAIL",
-                message=f"{len(failed)}/{stripe_count} parallel dd writes failed: "
-                f"{failed[0].stderr.strip()}",
-                pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
-            )
+        rate = float(row["MiB/s [last]"])
 
         total_mb = stripe_count * size_mb_per_ost
-        rate = total_mb / elapsed
-        detail = f"{stripe_count} OSTs, {total_mb} MiB in {elapsed:.2f}s"
+        detail = f"{stripe_count} OSTs, {total_mb} MiB via elbencho ({stripe_count} threads)"
         if rate < fail_mbps:
             status = "FAIL"
             msg = f"{rate:.1f} MB/s aggregate below fail threshold {fail_mbps} ({detail})"
@@ -350,14 +364,15 @@ def pool_throughput_check(
             pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
         )
     except shell.CommandError as exc:
-        return PerfResult(
-            target=f"pool:{pool_label}", kind="throughput", value=0.0, unit="MB/s",
-            status="FAIL", message=str(exc),
-            pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
-        )
+        return _pool_fail(pool_label, "throughput", "MB/s", str(exc))
     finally:
+        for path in paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         try:
-            os.remove(path)
+            os.remove(csv_path)
         except OSError:
             pass
 
@@ -371,71 +386,56 @@ def pool_latency_check(
     warn_ms: float = DEFAULT_WARN_MS,
     fail_ms: float = DEFAULT_FAIL_MS,
 ) -> PerfResult:
-    """Measure worst-case write latency across a pool under concurrent load.
+    """Measure worst-case write latency across a pool under concurrent load
+    using `elbencho`.
 
-    Issues one small synced 4K write per OST in the pool at the same time
-    (same striping approach as `pool_throughput_check`) and reports the
-    slowest one, since that tail latency is what a client actually
+    Each OST gets its own scratch file (same per-OST striping as
+    `pool_throughput_check`), and `elbencho` issues one small 4K direct write
+    per OST concurrently (`-t <stripe_count>`, `-b 4k -s 4k`). The reported
+    max IO latency ("IO lat us [max]") across all worker threads is used as
+    the pool's latency, since that tail latency is what a client actually
     experiences when an I/O touches every stripe of a wide file.
     """
     indices = _group_ost_indices(targets)
     if not indices:
-        return PerfResult(
-            target=f"pool:{pool_label}", kind="latency", value=0.0, unit="ms",
-            status="FAIL", message="could not determine any OST indices in pool",
-            pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
+        return _pool_fail(
+            pool_label, "latency", "ms",
+            "could not determine any OST indices in pool",
         )
 
     stripe_count = len(indices)
-    path = os.path.join(mount_path, f".storage_validator_pool_lat_{pool_label}")
+    paths = _pool_ost_paths(pool_label, indices, mount_path, "lat")
+    csv_fd, csv_path = tempfile.mkstemp(prefix="storage_validator_elbencho_", suffix=".csv")
+    os.close(csv_fd)
+    os.remove(csv_path)
     try:
-        setstripe = shell.run_cmd(
-            _pool_setstripe_cmd(pool_label, fsname, indices, path), timeout=timeout
+        err = _setstripe_per_ost(indices, paths, timeout)
+        if err:
+            return _pool_fail(pool_label, "latency", "ms", err)
+
+        result = shell.run_cmd(
+            [
+                "elbencho", "-w", "-t", str(stripe_count), "-b", "4k",
+                "-s", "4k", "--direct",
+                "--csvfile", csv_path,
+            ] + paths,
+            timeout=timeout,
         )
-        if not setstripe.ok:
-            return PerfResult(
-                target=f"pool:{pool_label}", kind="latency", value=0.0, unit="ms",
-                status="FAIL", message=f"lfs setstripe failed: {setstripe.stderr.strip()}",
-                pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
+        if not result.ok:
+            return _pool_fail(
+                pool_label, "latency", "ms",
+                f"elbencho failed: {(result.stderr or result.stdout).strip()}",
             )
 
-        def _write_stripe(i: int) -> shell.CommandResult:
-            return shell.run_cmd(
-                [
-                    "dd", "if=/dev/zero", f"of={path}", "bs=4k", "count=1",
-                    f"seek={i}", "oflag=direct,sync", "conv=notrunc",
-                ],
-                timeout=timeout,
+        row = _read_elbencho_csv_last_row(csv_path)
+        if row is None or "IO lat us [max]" not in row:
+            return _pool_fail(
+                pool_label, "latency", "ms",
+                "could not parse elbencho CSV output",
             )
+        worst_ms = float(row["IO lat us [max]"]) / 1000.0
 
-        workers = min(stripe_count, MAX_POOL_WORKERS)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            dd_results = list(pool.map(_write_stripe, range(stripe_count)))
-
-        failed = [r for r in dd_results if not r.ok]
-        if failed:
-            return PerfResult(
-                target=f"pool:{pool_label}", kind="latency", value=0.0, unit="ms",
-                status="FAIL",
-                message=f"{len(failed)}/{stripe_count} parallel dd writes failed: "
-                f"{failed[0].stderr.strip()}",
-                pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
-            )
-
-        latencies_ms = []
-        for r in dd_results:
-            match = _DD_RATE_RE.search(r.stdout + r.stderr)
-            if match:
-                latencies_ms.append(float(match.group("seconds")) * 1000.0)
-        if not latencies_ms:
-            return PerfResult(
-                target=f"pool:{pool_label}", kind="latency", value=0.0, unit="ms",
-                status="FAIL", message="dd output unparsable for all parallel writes",
-                pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
-            )
-
-        worst_ms = max(latencies_ms)
-        detail = f"worst of {stripe_count} concurrent OST writes"
+        detail = f"worst of {stripe_count} concurrent OST writes via elbencho"
         if worst_ms > fail_ms:
             status = "FAIL"
             msg = f"{worst_ms:.2f} ms above fail threshold {fail_ms} ({detail})"
@@ -450,14 +450,15 @@ def pool_latency_check(
             pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
         )
     except shell.CommandError as exc:
-        return PerfResult(
-            target=f"pool:{pool_label}", kind="latency", value=0.0, unit="ms",
-            status="FAIL", message=str(exc),
-            pool=pool_label if pool_label != "(unpooled)" else None, scope="pool",
-        )
+        return _pool_fail(pool_label, "latency", "ms", str(exc))
     finally:
+        for path in paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         try:
-            os.remove(path)
+            os.remove(csv_path)
         except OSError:
             pass
 
@@ -473,12 +474,13 @@ def run_perf_checks(
 ) -> list[PerfResult]:
     """Run throughput + latency checks against every OST in the topology,
     then run one real aggregate throughput+latency test per OST pool (plus
-    one for any OSTs that aren't in a pool): a single file striped across
-    every OST in the group, written concurrently (one writer per stripe), so
-    the pool result reflects actual aggregate bandwidth/tail latency rather
-    than an average of independent single-OST tests. Each pool's own
-    thresholds are used so different drive types (e.g. ssd vs hdd pools)
-    aren't judged against the same bar.
+    one for any OSTs that aren't in a pool) using `elbencho`: one
+    single-striped scratch file per OST, driven concurrently by one
+    elbencho worker thread per file, so the pool result reflects actual
+    multi-threaded aggregate bandwidth/tail latency rather than an average
+    of independent single-OST `dd` tests. Each pool's own thresholds are
+    used so different drive types (e.g. ssd vs hdd pools) aren't judged
+    against the same bar.
     """
     default_thresholds = default_thresholds or PerfThresholds()
     pool_size_mb_per_ost = pool_size_mb_per_ost or size_mb

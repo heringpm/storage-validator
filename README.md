@@ -16,7 +16,8 @@ pip install -e .[dev]
 ```
 
 Requires Python >= 3.9, and the `lfs`/`lctl` Lustre client tools available on
-`PATH` for the `lustre` backend.
+`PATH` for the `lustre` backend. Pool-level perf checks also require
+[`elbencho`](https://github.com/breuner/elbencho) on `PATH`.
 
 ## Usage
 
@@ -52,10 +53,12 @@ Use different perf thresholds per Lustre OST pool (e.g. mixed drive types like
 flash vs. archive). Each `--pool-threshold` applies to OSTs in that pool and is
 repeatable; OSTs in pools without an override, or not in any pool, use the
 `--warn-mbps`/`--fail-mbps`/`--warn-ms`/`--fail-ms` defaults. In addition to
-the per-OST checks, each pool gets a real aggregate test: one file striped
-across every OST in the pool, written concurrently (one writer per stripe),
-measuring true aggregate MB/s and worst-case tail latency across the pool —
-not an average of the independent per-OST results:
+the per-OST `dd` checks, each pool gets a real multi-threaded aggregate test
+using [`elbencho`](https://github.com/breuner/elbencho) (must be installed
+and on `PATH`): one scratch file is single-striped onto each OST in the
+pool, then elbencho drives all of them concurrently with one worker thread
+per file, measuring true aggregate MB/s and worst-case tail latency across
+the pool — not an average of the independent per-OST results:
 
 ```
 storage-validator \
