@@ -69,6 +69,12 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
         "Defaults to --size-mb."
     ),
 )
+@click.option(
+    "--elbencho-path",
+    default="elbencho",
+    show_default=True,
+    help="Path to the elbencho binary used for perf checks, if not on PATH.",
+)
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress the console table output.")
 def main(
@@ -85,6 +91,7 @@ def main(
     skip_perf: bool,
     pool_thresholds: tuple[str, ...],
     pool_size_mb_per_ost: int | None,
+    elbencho_path: str,
     json_path: str | None,
     quiet: bool,
 ) -> None:
@@ -104,6 +111,7 @@ def main(
             fail_ms=fail_ms,
             pool_thresholds=parsed_pool_thresholds,
             pool_size_mb_per_ost=pool_size_mb_per_ost,
+            elbencho_path=elbencho_path,
         ),
     )
 

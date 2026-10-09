@@ -55,7 +55,8 @@ repeatable; OSTs in pools without an override, or not in any pool, use the
 `--warn-mbps`/`--fail-mbps`/`--warn-ms`/`--fail-ms` defaults. Both the
 per-OST checks and the per-pool checks use
 [`elbencho`](https://github.com/breuner/elbencho) (must be installed and on
-`PATH`) instead of single-threaded `dd`. In addition to the per-OST checks,
+`PATH`, or pointed to explicitly with `--elbencho-path /path/to/elbencho`)
+instead of single-threaded `dd`. In addition to the per-OST checks,
 each pool gets a real multi-threaded aggregate test: one scratch file is
 single-striped onto each OST in the pool, then elbencho drives all of them
 concurrently with one worker thread per file, measuring true aggregate MB/s

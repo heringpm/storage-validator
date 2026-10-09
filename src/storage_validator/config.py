@@ -46,6 +46,9 @@ class PerfConfig:
     # test (total aggregate test size = this * number of OSTs in the pool).
     # Defaults to `size_mb` when not set.
     pool_size_mb_per_ost: Optional[int] = None
+    # Path to the `elbencho` binary, used for both per-OST and per-pool perf
+    # checks. Defaults to "elbencho" (resolved via PATH) when not set.
+    elbencho_path: str = "elbencho"
 
     @property
     def default_thresholds(self) -> PerfThresholds:

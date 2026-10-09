@@ -81,6 +81,23 @@ def test_cli_parses_pool_threshold_option():
     assert thresholds["archive"].fail_ms == 80.0
 
 
+def test_cli_parses_elbencho_path_option():
+    runner = CliRunner()
+    captured = {}
+
+    def fake_run(cfg):
+        captured["cfg"] = cfg
+        return make_report()
+
+    with patch("storage_validator.cli.engine.run", side_effect=fake_run):
+        result = runner.invoke(
+            main,
+            ["--skip-perf", "--quiet", "--elbencho-path", "/opt/elbencho/bin/elbencho"],
+        )
+    assert result.exit_code == 0
+    assert captured["cfg"].perf.elbencho_path == "/opt/elbencho/bin/elbencho"
+
+
 def test_cli_rejects_malformed_pool_threshold():
     runner = CliRunner()
     with patch("storage_validator.cli.engine.run", return_value=make_report()):

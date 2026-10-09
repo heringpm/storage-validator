@@ -79,6 +79,7 @@ def throughput_check(
     timeout: float = 60,
     warn_mbps: float = DEFAULT_WARN_MBPS,
     fail_mbps: float = DEFAULT_FAIL_MBPS,
+    elbencho_path: str = "elbencho",
 ) -> PerfResult:
     """Write `size_mb` MiB directly to `target`'s OST and measure throughput
     using `elbencho` (single worker thread, single-striped onto this OST).
@@ -114,7 +115,7 @@ def throughput_check(
 
         result = shell.run_cmd(
             [
-                "elbencho", "-w", "-t", "1", "-b", "1m",
+                elbencho_path, "-w", "-t", "1", "-b", "1m",
                 "-s", f"{size_mb}m", "--direct",
                 "--csvfile", csv_path, path,
             ],
@@ -167,6 +168,7 @@ def latency_check(
     timeout: float = 30,
     warn_ms: float = DEFAULT_WARN_MS,
     fail_ms: float = DEFAULT_FAIL_MS,
+    elbencho_path: str = "elbencho",
 ) -> PerfResult:
     """Measure single 4K direct-write latency on `target`'s OST using
     `elbencho` (single worker thread, single-striped onto this OST).
@@ -195,7 +197,7 @@ def latency_check(
 
         result = shell.run_cmd(
             [
-                "elbencho", "-w", "-t", "1", "-b", "4k",
+                elbencho_path, "-w", "-t", "1", "-b", "4k",
                 "-s", "4k", "--direct",
                 "--csvfile", csv_path, path,
             ],
@@ -319,6 +321,7 @@ def pool_throughput_check(
     timeout: float = 60,
     warn_mbps: float = DEFAULT_WARN_MBPS,
     fail_mbps: float = DEFAULT_FAIL_MBPS,
+    elbencho_path: str = "elbencho",
 ) -> PerfResult:
     """Measure real aggregate throughput across every OST in a pool using
     `elbencho`.
@@ -351,7 +354,7 @@ def pool_throughput_check(
 
         result = shell.run_cmd(
             [
-                "elbencho", "-w", "-t", str(stripe_count), "-b", "1m",
+                elbencho_path, "-w", "-t", str(stripe_count), "-b", "1m",
                 "-s", f"{size_mb_per_ost}m", "--direct",
                 "--csvfile", csv_path,
             ] + paths,
@@ -408,6 +411,7 @@ def pool_latency_check(
     timeout: float = 30,
     warn_ms: float = DEFAULT_WARN_MS,
     fail_ms: float = DEFAULT_FAIL_MS,
+    elbencho_path: str = "elbencho",
 ) -> PerfResult:
     """Measure worst-case write latency across a pool under concurrent load
     using `elbencho`.
@@ -438,7 +442,7 @@ def pool_latency_check(
 
         result = shell.run_cmd(
             [
-                "elbencho", "-w", "-t", str(stripe_count), "-b", "4k",
+                elbencho_path, "-w", "-t", str(stripe_count), "-b", "4k",
                 "-s", "4k", "--direct",
                 "--csvfile", csv_path,
             ] + paths,
@@ -494,6 +498,7 @@ def run_perf_checks(
     default_thresholds: PerfThresholds | None = None,
     pool_thresholds: dict[str, PerfThresholds] | None = None,
     pool_size_mb_per_ost: int | None = None,
+    elbencho_path: str = "elbencho",
 ) -> list[PerfResult]:
     """Run throughput + latency checks against every OST in the topology,
     then run one real aggregate throughput+latency test per OST pool (plus
@@ -514,10 +519,12 @@ def run_perf_checks(
         t_result = throughput_check(
             target, mount_path, size_mb, timeout,
             warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
+            elbencho_path=elbencho_path,
         )
         l_result = latency_check(
             target, mount_path, timeout=timeout,
             warn_ms=th.warn_ms, fail_ms=th.fail_ms,
+            elbencho_path=elbencho_path,
         )
         t_result.pool = target.pool
         l_result.pool = target.pool
@@ -533,12 +540,14 @@ def run_perf_checks(
                 pool_label, group_targets, topology.fsname, mount_path,
                 size_mb_per_ost=pool_size_mb_per_ost, timeout=timeout,
                 warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
+                elbencho_path=elbencho_path,
             )
         )
         results.append(
             pool_latency_check(
                 pool_label, group_targets, topology.fsname, mount_path,
                 timeout=timeout, warn_ms=th.warn_ms, fail_ms=th.fail_ms,
+                elbencho_path=elbencho_path,
             )
         )
     return results
