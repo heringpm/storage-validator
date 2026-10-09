@@ -123,7 +123,7 @@ def _run_elbencho_rw(
         result = shell.run_cmd(
             [
                 elbencho_path, io_flag, "-t", str(threads), "-b", block_size,
-                "-s", size, "--direct", "--timelimit", str(runtime),
+                "-s", size, "--direct", "--lat", "--timelimit", str(runtime),
                 "--csvfile", csv_path,
             ] + extra_flags + paths,
             timeout=timeout,
@@ -132,9 +132,12 @@ def _run_elbencho_rw(
             raise ElbenchoError((result.stderr or result.stdout).strip())
 
         row = _read_elbencho_csv_last_row(csv_path)
-        if row is None or "MiB/s [last]" not in row or "IO lat us [max]" not in row:
-            raise ElbenchoError("could not parse elbencho CSV output")
-        return float(row["MiB/s [last]"]), float(row["IO lat us [max]"])
+        if row is None or not row.get("MiB/s [last]") or not row.get("IO lat us [max]"):
+            raise ElbenchoError("could not parse elbencho CSV output (missing --lat?)")
+        try:
+            return float(row["MiB/s [last]"]), float(row["IO lat us [max]"])
+        except ValueError as exc:
+            raise ElbenchoError(f"could not parse elbencho CSV output: {exc}") from exc
     finally:
         try:
             os.remove(csv_path)
