@@ -28,6 +28,9 @@ def run(
     # Importing the backends package registers all built-in backends
     # (lustre, and future others) with BACKEND_REGISTRY as a side effect.
     import storage_validator.backends.lustre  # noqa: F401
+    from storage_validator.backends.lustre import shell
+
+    shell.set_dry_run(cfg.dry_run)
 
     backend_cls = get_backend(cfg.backend)
     backend = backend_cls(health_cfg=cfg.health)

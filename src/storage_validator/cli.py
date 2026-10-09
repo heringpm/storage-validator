@@ -53,6 +53,12 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
 @click.option("--fail-ms", default=50.0, show_default=True, help="Write latency (ms) above which to FAIL.")
 @click.option("--skip-perf", is_flag=True, default=False, help="Skip throughput/latency perf checks.")
 @click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print every lfs/lctl/elbencho command that would be run instead of running it. No real discovery/health/perf data is produced.",
+)
+@click.option(
     "--pool-threshold",
     "pool_thresholds",
     multiple=True,
@@ -109,6 +115,7 @@ def main(
     warn_ms: float,
     fail_ms: float,
     skip_perf: bool,
+    dry_run: bool,
     pool_thresholds: tuple[str, ...],
     elbencho_path: str,
     perf_threads: int | None,
@@ -122,6 +129,7 @@ def main(
     cfg = Config(
         backend=backend,
         skip_perf=skip_perf,
+        dry_run=dry_run,
         health=HealthConfig(warn_pct=warn_pct, fail_pct=fail_pct),
         perf=PerfConfig(
             mount_path=mount_path,

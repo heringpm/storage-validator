@@ -151,6 +151,9 @@ def _run_elbencho_rw(
         )
         if not result.ok:
             raise ElbenchoError((result.stderr or result.stdout).strip())
+        if shell.DRY_RUN:
+            # elbencho never actually ran, so there's no CSV to parse.
+            return 0.0, 0.0
 
         row = _read_elbencho_csv_last_row(csv_path, "WRITE" if mode == "write" else "READ")
         if row is None or not row.get("MiB/s [last]") or not row.get("IO lat us [max]"):
@@ -299,6 +302,7 @@ def ost_rw_check(
     return _build_results(
         target.name, write_rate, write_lat_us, read_rate, read_lat_us,
         warn_mbps, fail_mbps, warn_ms, fail_ms,
+        detail="dry run, no real data" if shell.DRY_RUN else "",
     )
 
 
@@ -415,6 +419,8 @@ def pool_rw_check(
                 pass
 
     detail = f"{stripe_count} OSTs, {threads} threads total"
+    if shell.DRY_RUN:
+        detail += ", dry run, no real data"
     return _build_results(
         f"pool:{pool_label}", write_rate, write_lat_us, read_rate, read_lat_us,
         warn_mbps, fail_mbps, warn_ms, fail_ms, detail=detail, **pool_kwargs,

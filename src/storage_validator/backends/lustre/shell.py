@@ -6,8 +6,21 @@ Centralizing subprocess calls here makes it trivial to mock in tests via
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from dataclasses import dataclass
+
+# When True, `run_cmd` only prints the command it would have run (via
+# `DRY_RUN_SINK`, a callable taking the formatted command line) instead of
+# executing it, returning a canned successful result. Toggled on by the
+# CLI's `--dry-run` flag.
+DRY_RUN = False
+DRY_RUN_SINK = print
+
+
+def set_dry_run(enabled: bool) -> None:
+    global DRY_RUN
+    DRY_RUN = enabled
 
 
 class CommandError(Exception):
@@ -36,7 +49,14 @@ def run_cmd(args: list[str], timeout: float = 30) -> CommandResult:
 
     Raises CommandError if the binary is missing or the call times out.
     A non-zero return code does NOT raise; callers inspect `.ok`/`.returncode`.
+
+    If `DRY_RUN` is enabled, the command is only printed (via `DRY_RUN_SINK`)
+    and not actually executed; a canned successful `CommandResult` (empty
+    stdout/stderr, returncode 0) is returned instead.
     """
+    if DRY_RUN:
+        DRY_RUN_SINK(f"[DRY RUN] {shlex.join(args)}")
+        return CommandResult(args=args, returncode=0, stdout="", stderr="")
     try:
         proc = subprocess.run(
             args,

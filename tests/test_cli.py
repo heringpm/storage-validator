@@ -179,6 +179,34 @@ def test_cli_defaults_ost_and_pool_filters_to_none():
     assert captured["cfg"].perf.pool_names is None
 
 
+def test_cli_parses_dry_run_flag():
+    runner = CliRunner()
+    captured = {}
+
+    def fake_run(cfg):
+        captured["cfg"] = cfg
+        return make_report()
+
+    with patch("storage_validator.cli.engine.run", side_effect=fake_run):
+        result = runner.invoke(main, ["--skip-perf", "--quiet", "--dry-run"])
+    assert result.exit_code == 0
+    assert captured["cfg"].dry_run is True
+
+
+def test_cli_defaults_dry_run_to_false():
+    runner = CliRunner()
+    captured = {}
+
+    def fake_run(cfg):
+        captured["cfg"] = cfg
+        return make_report()
+
+    with patch("storage_validator.cli.engine.run", side_effect=fake_run):
+        result = runner.invoke(main, ["--skip-perf", "--quiet"])
+    assert result.exit_code == 0
+    assert captured["cfg"].dry_run is False
+
+
 def test_cli_rejects_malformed_pool_threshold():
     runner = CliRunner()
     with patch("storage_validator.cli.engine.run", return_value=make_report()):

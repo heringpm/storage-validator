@@ -54,3 +54,43 @@ def test_run_skips_perf_when_configured():
 def test_run_unknown_backend_raises():
     with pytest.raises(ValueError):
         engine.run(Config(backend="nope"))
+
+
+def test_run_enables_shell_dry_run_when_configured():
+    from storage_validator.backends.lustre import shell
+
+    topo = _topology()
+    try:
+        with patch(
+            "storage_validator.backends.lustre.backend.LustreBackend.discover",
+            return_value=topo,
+        ), patch(
+            "storage_validator.backends.lustre.backend.LustreBackend.run_health_checks",
+            return_value=[],
+        ), patch(
+            "storage_validator.backends.lustre.backend.LustreBackend.run_perf_checks",
+            return_value=[],
+        ):
+            engine.run(Config(dry_run=True))
+        assert shell.DRY_RUN is True
+    finally:
+        shell.set_dry_run(False)
+
+
+def test_run_disables_shell_dry_run_by_default():
+    from storage_validator.backends.lustre import shell
+
+    shell.set_dry_run(True)
+    topo = _topology()
+    with patch(
+        "storage_validator.backends.lustre.backend.LustreBackend.discover",
+        return_value=topo,
+    ), patch(
+        "storage_validator.backends.lustre.backend.LustreBackend.run_health_checks",
+        return_value=[],
+    ), patch(
+        "storage_validator.backends.lustre.backend.LustreBackend.run_perf_checks",
+        return_value=[],
+    ):
+        engine.run(Config())
+    assert shell.DRY_RUN is False
