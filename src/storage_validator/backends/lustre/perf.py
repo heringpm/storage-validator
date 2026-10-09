@@ -2,15 +2,18 @@
 
 Both per-OST checks (`ost_rw_check`) and per-pool checks (`pool_rw_check`)
 measure performance using `elbencho`, a multi-threaded direct-I/O benchmark
-tool. Each check runs one elbencho invocation per I/O direction (write, then
-read) and derives *both* the throughput ("MiB/s [last]") and the latency
-("IO lat us [max]") from that single run's CSV output -- there is no
-separate latency-only test.
+tool. Each check runs exactly one write pass followed by one read pass
+against the same scratch file(s), deriving throughput ("MiB/s [last]") and
+latency ("IO lat us [max]") from each pass's CSV output -- there is no
+separate latency-only test, and the write pass's data is reused for the
+read pass instead of writing it twice.
 
-A single elbencho invocation -- whether it targets one OST (per-OST check)
-or every OST in a pool at once (per-pool check, one scratch file per OST
-passed as multiple paths) -- always uses exactly `threads` worker threads in
-total. It is never multiplied by the number of OSTs in a pool, so a run on a
+Every worker thread gets its own dedicated scratch file (one file per
+thread), rather than all threads sharing a single file. For a per-OST check
+all of a check's files are single-striped onto that one OST; for a per-pool
+check the files are spread as evenly as possible across every OST in the
+pool. Either way, a check always uses exactly `threads` files/threads in
+total -- never multiplied by the number of OSTs in a pool -- so a run on a
 single system never uses more worker threads than the configured/detected
 CPU thread count.
 
@@ -148,21 +151,66 @@ def _classify_latency(latency_ms: float, warn_ms: float, fail_ms: float) -> tupl
     return "PASS", f"{latency_ms:.2f} ms"
 
 
-def _fail_pair(
-    target_name: str, mode: IoMode, message: str,
+def _fail_quad(
+    target_name: str, message: str,
     pool: str | None = None, scope: Literal["ost", "pool"] = "ost",
-) -> tuple[PerfResult, PerfResult]:
-    common = dict(target=target_name, status="FAIL", message=message, pool=pool, scope=scope, io_mode=mode)
-    return (
-        PerfResult(kind="throughput", value=0.0, unit="MB/s", **common),
-        PerfResult(kind="latency", value=0.0, unit="ms", **common),
+) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
+    results = []
+    for mode in ("write", "read"):
+        common = dict(target=target_name, status="FAIL", message=message, pool=pool, scope=scope, io_mode=mode)
+        results.append(PerfResult(kind="throughput", value=0.0, unit="MB/s", **common))
+        results.append(PerfResult(kind="latency", value=0.0, unit="ms", **common))
+    return tuple(results)
+
+
+def _write_then_read(
+    paths: list[str],
+    size: str,
+    block_size: str,
+    runtime: int,
+    elbencho_path: str,
+    timeout: float,
+) -> tuple[float, float, float, float]:
+    """Run one write pass against `paths` (one file per worker thread), then
+    read that same data back, returning
+    `(write_mibs, write_lat_us, read_mibs, read_lat_us)`.
+
+    The write pass's data is reused for the read pass instead of writing it
+    twice. `threads` for each pass equals `len(paths)` (one thread per file).
+    """
+    threads = len(paths)
+    write_rate, write_lat_us = _run_elbencho_rw(
+        paths, "write", threads, size, block_size, runtime, elbencho_path, timeout
     )
+    read_rate, read_lat_us = _run_elbencho_rw(
+        paths, "read", threads, size, block_size, runtime, elbencho_path, timeout
+    )
+    return write_rate, write_lat_us, read_rate, read_lat_us
+
+
+def _build_results(
+    target_name: str,
+    write_rate: float, write_lat_us: float, read_rate: float, read_lat_us: float,
+    warn_mbps: float, fail_mbps: float, warn_ms: float, fail_ms: float,
+    pool: str | None = None, scope: Literal["ost", "pool"] = "ost",
+    detail: str = "",
+) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
+    results = []
+    for mode, rate, lat_us in (("write", write_rate, write_lat_us), ("read", read_rate, read_lat_us)):
+        latency_ms = lat_us / 1000.0
+        t_status, t_msg = _classify_throughput(rate, warn_mbps, fail_mbps)
+        l_status, l_msg = _classify_latency(latency_ms, warn_ms, fail_ms)
+        if detail:
+            t_msg, l_msg = f"{t_msg} ({detail})", f"{l_msg} ({detail})"
+        common = dict(target=target_name, pool=pool, scope=scope, io_mode=mode)
+        results.append(PerfResult(kind="throughput", value=rate, unit="MB/s", status=t_status, message=t_msg, **common))
+        results.append(PerfResult(kind="latency", value=latency_ms, unit="ms", status=l_status, message=l_msg, **common))
+    return tuple(results)
 
 
 def ost_rw_check(
     target: Target,
     mount_path: str,
-    mode: IoMode,
     size: str = DEFAULT_SIZE,
     block_size: str = DEFAULT_BLOCK_SIZE,
     runtime: int = DEFAULT_RUNTIME,
@@ -173,55 +221,50 @@ def ost_rw_check(
     fail_ms: float = DEFAULT_FAIL_MS,
     elbencho_path: str = "elbencho",
     threads: int | None = None,
-) -> tuple[PerfResult, PerfResult]:
+) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
-    read pass against `target`'s OST (single-striped onto it), returning
-    `(throughput_result, latency_result)` for the requested `mode`.
+    read pass against `target`'s OST, returning
+    `(write_throughput, write_latency, read_throughput, read_latency)`.
 
-    The write pass always runs first to populate the scratch file (`elbencho`
-    can't read a file that doesn't already contain data), and the scratch
-    file is only removed after both passes have completed.
+    Each of the `threads` worker threads gets its own dedicated scratch file,
+    all single-striped onto `target`'s OST. The write pass's data is reused
+    for the read pass, and the scratch files are only removed once both
+    passes have completed.
     """
     threads = threads or detect_cpu_thread_count()
     idx = ost_index(target)
     if idx is None:
-        return _fail_pair(
-            target.name, mode, f"could not determine OST index from name {target.name!r}"
+        return _fail_quad(
+            target.name, f"could not determine OST index from name {target.name!r}"
         )
 
-    path = os.path.join(mount_path, f".storage_validator_perf_{target.name}")
+    paths = [
+        os.path.join(mount_path, f".storage_validator_perf_{target.name}_t{i}")
+        for i in range(threads)
+    ]
     try:
-        setstripe = shell.run_cmd(
-            ["lfs", "setstripe", "-i", str(idx), "-c", "1", path], timeout=timeout
-        )
-        if not setstripe.ok:
-            return _fail_pair(target.name, mode, f"lfs setstripe failed: {setstripe.stderr.strip()}")
-
-        write_rate, write_lat_us = _run_elbencho_rw(
-            [path], "write", threads, size, block_size, runtime, elbencho_path, timeout
-        )
-        if mode == "write":
-            rate, lat_us = write_rate, write_lat_us
-        else:
-            rate, lat_us = _run_elbencho_rw(
-                [path], "read", threads, size, block_size, runtime, elbencho_path, timeout
+        for path in paths:
+            setstripe = shell.run_cmd(
+                ["lfs", "setstripe", "-i", str(idx), "-c", "1", path], timeout=timeout
             )
-    except (shell.CommandError, ElbenchoError) as exc:
-        return _fail_pair(target.name, mode, f"elbencho failed: {exc}")
-    finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+            if not setstripe.ok:
+                return _fail_quad(target.name, f"lfs setstripe failed: {setstripe.stderr.strip()}")
 
-    latency_ms = lat_us / 1000.0
-    t_status, t_msg = _classify_throughput(rate, warn_mbps, fail_mbps)
-    l_status, l_msg = _classify_latency(latency_ms, warn_ms, fail_ms)
-    return (
-        PerfResult(target=target.name, kind="throughput", value=rate, unit="MB/s",
-                    status=t_status, message=t_msg, io_mode=mode),
-        PerfResult(target=target.name, kind="latency", value=latency_ms, unit="ms",
-                    status=l_status, message=l_msg, io_mode=mode),
+        write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
+            paths, size, block_size, runtime, elbencho_path, timeout
+        )
+    except (shell.CommandError, ElbenchoError) as exc:
+        return _fail_quad(target.name, f"elbencho failed: {exc}")
+    finally:
+        for path in paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    return _build_results(
+        target.name, write_rate, write_lat_us, read_rate, read_lat_us,
+        warn_mbps, fail_mbps, warn_ms, fail_ms,
     )
 
 
@@ -250,22 +293,31 @@ def _group_ost_indices(targets: list[Target]) -> list[int]:
     return sorted(indices)
 
 
-def _pool_ost_paths(pool_label: str, indices: list[int], mount_path: str, suffix: str) -> list[str]:
-    """One dedicated scratch file per OST index, so each can be independently
-    single-striped onto its own OST before the shared elbencho run.
+def _pool_file_osts(indices: list[int], threads: int) -> list[int]:
+    """Assign each of `threads` per-thread scratch files to an OST index,
+    cycling through `indices` so files are spread as evenly as possible
+    across every OST in the pool (never multiplying thread count by OST
+    count -- the total file/thread count is always exactly `threads`).
+    """
+    return [indices[i % len(indices)] for i in range(threads)]
+
+
+def _pool_ost_paths(pool_label: str, file_osts: list[int], mount_path: str) -> list[str]:
+    """One dedicated scratch file per worker thread, named with both the
+    pool and the OST index it's single-striped onto.
     """
     return [
-        os.path.join(mount_path, f".storage_validator_pool_{suffix}_{pool_label}_{idx}")
-        for idx in indices
+        os.path.join(mount_path, f".storage_validator_pool_{pool_label}_{idx}_t{i}")
+        for i, idx in enumerate(file_osts)
     ]
 
 
-def _setstripe_per_ost(indices: list[int], paths: list[str], timeout: float) -> str | None:
-    """Single-stripe every path onto its matching OST index.
+def _setstripe_per_file(file_osts: list[int], paths: list[str], timeout: float) -> str | None:
+    """Single-stripe every path onto its assigned OST index.
 
     Returns an error message if any `lfs setstripe` call fails, else None.
     """
-    for idx, path in zip(indices, paths):
+    for idx, path in zip(file_osts, paths):
         result = shell.run_cmd(
             ["lfs", "setstripe", "-i", str(idx), "-c", "1", path], timeout=timeout
         )
@@ -278,7 +330,6 @@ def pool_rw_check(
     pool_label: str,
     targets: list[Target],
     mount_path: str,
-    mode: IoMode,
     size: str = DEFAULT_SIZE,
     block_size: str = DEFAULT_BLOCK_SIZE,
     runtime: int = DEFAULT_RUNTIME,
@@ -289,43 +340,39 @@ def pool_rw_check(
     fail_ms: float = DEFAULT_FAIL_MS,
     elbencho_path: str = "elbencho",
     threads: int | None = None,
-) -> tuple[PerfResult, PerfResult]:
+) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
-    read pass across every OST in a pool at once (one single-striped scratch
-    file per OST, `threads` worker threads total spread across all of them --
-    not multiplied by OST count), returning `(throughput_result,
-    latency_result)` for the requested `mode`.
+    read pass across every OST in a pool at once, returning
+    `(write_throughput, write_latency, read_throughput, read_latency)`.
 
-    The write pass always runs first to populate the scratch files
-    (`elbencho` can't read a file that doesn't already contain data), and the
-    scratch files are only removed after both passes have completed.
+    Each of the `threads` worker threads gets its own dedicated scratch file,
+    cycled across every OST in the pool so the files are spread as evenly as
+    possible (total files/threads is always exactly `threads`, never
+    multiplied by OST count). The write pass's data is reused for the read
+    pass, and the scratch files are only removed once both passes have
+    completed.
     """
     pool_kwargs = dict(pool=pool_label if pool_label != "(unpooled)" else None, scope="pool")
     indices = _group_ost_indices(targets)
     if not indices:
-        return _fail_pair(
-            f"pool:{pool_label}", mode, "could not determine any OST indices in pool", **pool_kwargs
+        return _fail_quad(
+            f"pool:{pool_label}", "could not determine any OST indices in pool", **pool_kwargs
         )
 
     threads = threads or detect_cpu_thread_count()
     stripe_count = len(indices)
-    paths = _pool_ost_paths(pool_label, indices, mount_path, "rw")
+    file_osts = _pool_file_osts(indices, threads)
+    paths = _pool_ost_paths(pool_label, file_osts, mount_path)
     try:
-        err = _setstripe_per_ost(indices, paths, timeout)
+        err = _setstripe_per_file(file_osts, paths, timeout)
         if err:
-            return _fail_pair(f"pool:{pool_label}", mode, err, **pool_kwargs)
+            return _fail_quad(f"pool:{pool_label}", err, **pool_kwargs)
 
-        write_rate, write_lat_us = _run_elbencho_rw(
-            paths, "write", threads, size, block_size, runtime, elbencho_path, timeout
+        write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
+            paths, size, block_size, runtime, elbencho_path, timeout
         )
-        if mode == "write":
-            rate, lat_us = write_rate, write_lat_us
-        else:
-            rate, lat_us = _run_elbencho_rw(
-                paths, "read", threads, size, block_size, runtime, elbencho_path, timeout
-            )
     except (shell.CommandError, ElbenchoError) as exc:
-        return _fail_pair(f"pool:{pool_label}", mode, f"elbencho failed: {exc}", **pool_kwargs)
+        return _fail_quad(f"pool:{pool_label}", f"elbencho failed: {exc}", **pool_kwargs)
     finally:
         for path in paths:
             try:
@@ -333,15 +380,10 @@ def pool_rw_check(
             except OSError:
                 pass
 
-    latency_ms = lat_us / 1000.0
     detail = f"{stripe_count} OSTs, {threads} threads total"
-    t_status, t_msg = _classify_throughput(rate, warn_mbps, fail_mbps)
-    l_status, l_msg = _classify_latency(latency_ms, warn_ms, fail_ms)
-    return (
-        PerfResult(target=f"pool:{pool_label}", kind="throughput", value=rate, unit="MB/s",
-                    status=t_status, message=f"{t_msg} ({detail})", io_mode=mode, **pool_kwargs),
-        PerfResult(target=f"pool:{pool_label}", kind="latency", value=latency_ms, unit="ms",
-                    status=l_status, message=f"{l_msg} ({detail})", io_mode=mode, **pool_kwargs),
+    return _build_results(
+        f"pool:{pool_label}", write_rate, write_lat_us, read_rate, read_lat_us,
+        warn_mbps, fail_mbps, warn_ms, fail_ms, detail=detail, **pool_kwargs,
     )
 
 
@@ -357,12 +399,12 @@ def run_perf_checks(
     elbencho_path: str = "elbencho",
     threads: int | None = None,
 ) -> list[PerfResult]:
-    """Run write + read throughput/latency checks against every OST in the
-    topology, then one write + read aggregate throughput/latency test per
-    OST pool (plus one for any OSTs that aren't in a pool).
+    """Run one write+read throughput/latency check against every OST in the
+    topology, then one write+read aggregate throughput/latency test per OST
+    pool (plus one for any OSTs that aren't in a pool).
 
-    Every single elbencho invocation (per-OST or per-pool) uses `threads`
-    worker threads in total -- never multiplied by the number of OSTs in a
+    Every single check (per-OST or per-pool) uses `threads` worker
+    threads/files in total -- never multiplied by the number of OSTs in a
     pool -- so a run never exceeds the host's thread count (detected once
     via `lscpu`, or the `threads` override) regardless of topology size.
     Each pool's own thresholds are used so different drive types (e.g. ssd
@@ -374,29 +416,25 @@ def run_perf_checks(
     groups: dict[str, list[Target]] = defaultdict(list)
     for target in topology.osts:
         th = resolve_thresholds(target, default_thresholds, pool_thresholds)
-        for mode in ("write", "read"):
-            t_result, l_result = ost_rw_check(
-                target, mount_path, mode, size, block_size, runtime, timeout,
-                warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
-                warn_ms=th.warn_ms, fail_ms=th.fail_ms,
-                elbencho_path=elbencho_path, threads=threads,
-            )
-            t_result.pool = target.pool
-            l_result.pool = target.pool
-            results.append(t_result)
-            results.append(l_result)
+        quad = ost_rw_check(
+            target, mount_path, size, block_size, runtime, timeout,
+            warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
+            warn_ms=th.warn_ms, fail_ms=th.fail_ms,
+            elbencho_path=elbencho_path, threads=threads,
+        )
+        for result in quad:
+            result.pool = target.pool
+            results.append(result)
         pool_label = target.pool or "(unpooled)"
         groups[pool_label].append(target)
 
     for pool_label, group_targets in groups.items():
         th = (pool_thresholds or {}).get(pool_label, default_thresholds)
-        for mode in ("write", "read"):
-            t_result, l_result = pool_rw_check(
-                pool_label, group_targets, mount_path, mode, size, block_size, runtime, timeout,
-                warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
-                warn_ms=th.warn_ms, fail_ms=th.fail_ms,
-                elbencho_path=elbencho_path, threads=threads,
-            )
-            results.append(t_result)
-            results.append(l_result)
+        quad = pool_rw_check(
+            pool_label, group_targets, mount_path, size, block_size, runtime, timeout,
+            warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
+            warn_ms=th.warn_ms, fail_ms=th.fail_ms,
+            elbencho_path=elbencho_path, threads=threads,
+        )
+        results.extend(quad)
     return results

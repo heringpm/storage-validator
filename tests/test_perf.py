@@ -66,11 +66,13 @@ def test_ost_rw_check_pass(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=_fake_elbencho_run_cmd(rate=300.0, lat_us=1000.0),
     ), patch("os.remove"):
-        t_result, l_result = perf.ost_rw_check(OST0, str(tmp_path), "write", threads=1)
-    assert t_result.status == "PASS"
-    assert t_result.value == 300.0
-    assert l_result.value == 1.0
-    assert t_result.io_mode == "write"
+        wt, wl, rt, rl = perf.ost_rw_check(OST0, str(tmp_path), threads=1)
+    assert wt.status == "PASS"
+    assert wt.value == 300.0
+    assert wl.value == 1.0
+    assert wt.io_mode == "write"
+    assert rt.io_mode == "read"
+    assert rt.value == 300.0
 
 
 def test_ost_rw_check_warn(tmp_path):
@@ -78,9 +80,10 @@ def test_ost_rw_check_warn(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=_fake_elbencho_run_cmd(rate=100.0),
     ), patch("os.remove"):
-        t_result, _ = perf.ost_rw_check(OST0, str(tmp_path), "read", threads=1)
-    assert t_result.status == "WARN"
-    assert t_result.io_mode == "read"
+        wt, wl, rt, rl = perf.ost_rw_check(OST0, str(tmp_path), threads=1)
+    assert wt.status == "WARN"
+    assert rt.status == "WARN"
+    assert rt.io_mode == "read"
 
 
 def test_ost_rw_check_fail_low_rate(tmp_path):
@@ -88,8 +91,9 @@ def test_ost_rw_check_fail_low_rate(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=_fake_elbencho_run_cmd(rate=10.0),
     ), patch("os.remove"):
-        t_result, _ = perf.ost_rw_check(OST0, str(tmp_path), "write", threads=1)
-    assert t_result.status == "FAIL"
+        wt, wl, rt, rl = perf.ost_rw_check(OST0, str(tmp_path), threads=1)
+    assert wt.status == "FAIL"
+    assert rt.status == "FAIL"
 
 
 def test_ost_rw_check_setstripe_failure(tmp_path):
@@ -97,10 +101,12 @@ def test_ost_rw_check_setstripe_failure(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         return_value=shell_result(1, "", "setstripe error"),
     ), patch("os.remove"):
-        t_result, l_result = perf.ost_rw_check(OST0, str(tmp_path), "write", threads=1)
-    assert t_result.status == "FAIL"
-    assert l_result.status == "FAIL"
-    assert "setstripe" in t_result.message
+        wt, wl, rt, rl = perf.ost_rw_check(OST0, str(tmp_path), threads=1)
+    assert wt.status == "FAIL"
+    assert wl.status == "FAIL"
+    assert rt.status == "FAIL"
+    assert rl.status == "FAIL"
+    assert "setstripe" in wt.message
 
 
 def test_ost_rw_check_elbencho_failure(tmp_path):
@@ -113,12 +119,12 @@ def test_ost_rw_check_elbencho_failure(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=fake_run_cmd,
     ), patch("os.remove"):
-        t_result, _ = perf.ost_rw_check(OST0, str(tmp_path), "write", threads=1)
-    assert t_result.status == "FAIL"
-    assert "elbencho" in t_result.message
+        wt, wl, rt, rl = perf.ost_rw_check(OST0, str(tmp_path), threads=1)
+    assert wt.status == "FAIL"
+    assert "elbencho" in wt.message
 
 
-def test_ost_rw_check_uses_configured_threads(tmp_path):
+def test_ost_rw_check_uses_configured_threads_and_one_file_per_thread(tmp_path):
     captured_cmds = []
 
     def fake_run_cmd(args, timeout=30):
@@ -129,34 +135,23 @@ def test_ost_rw_check_uses_configured_threads(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=fake_run_cmd,
     ), patch("os.remove"):
-        perf.ost_rw_check(OST0, str(tmp_path), "write", threads=8)
+        perf.ost_rw_check(OST0, str(tmp_path), threads=8)
 
-    elbencho_cmd = next(c for c in captured_cmds if "elbencho" in c[0])
-    assert elbencho_cmd[elbencho_cmd.index("-t") + 1] == "8"
-    assert "--direct" in elbencho_cmd
-    assert "-w" in elbencho_cmd
-
-
-def test_ost_rw_check_read_uses_dash_r(tmp_path):
-    """A read-mode check must first run a write pass to populate the scratch
-    file (elbencho can't read a file with no data), then a read pass."""
-    captured_cmds = []
-
-    def fake_run_cmd(args, timeout=30):
-        captured_cmds.append(args)
-        return _fake_elbencho_run_cmd()(args, timeout=timeout)
-
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=fake_run_cmd,
-    ), patch("os.remove"):
-        perf.ost_rw_check(OST0, str(tmp_path), "read", threads=1)
-
+    setstripe_cmds = [c for c in captured_cmds if c[0] == "lfs"]
+    assert len(setstripe_cmds) == 8  # one scratch file per worker thread
     elbencho_cmds = [c for c in captured_cmds if "elbencho" in c[0]]
-    assert len(elbencho_cmds) == 2
+    assert len(elbencho_cmds) == 2  # one write pass, one read pass
+    for cmd in elbencho_cmds:
+        assert cmd[cmd.index("-t") + 1] == "8"
+        assert "--direct" in cmd
     assert "-w" in elbencho_cmds[0]
     assert "-r" in elbencho_cmds[1]
     assert "-w" not in elbencho_cmds[1]
+    # Both passes target the same set of per-thread scratch file paths.
+    write_paths = elbencho_cmds[0][elbencho_cmds[0].index("--csvfile") + 2:]
+    read_paths = elbencho_cmds[1][elbencho_cmds[1].index("--csvfile") + 2:]
+    assert write_paths == read_paths
+    assert len(set(write_paths)) == 8
 
 
 def test_ost_rw_check_defaults_threads_to_detected_cpu_count(tmp_path):
@@ -172,16 +167,18 @@ def test_ost_rw_check_defaults_threads_to_detected_cpu_count(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=fake_run_cmd,
     ), patch("os.remove"):
-        perf.ost_rw_check(OST0, str(tmp_path), "write")
+        perf.ost_rw_check(OST0, str(tmp_path))
 
     elbencho_cmd = next(c for c in captured_cmds if "elbencho" in c[0])
     assert elbencho_cmd[elbencho_cmd.index("-t") + 1] == "6"
 
 
 def test_ost_rw_check_bad_target_name(tmp_path):
-    t_result, l_result = perf.ost_rw_check(BAD_NAME, str(tmp_path), "write", threads=1)
-    assert t_result.status == "FAIL"
-    assert l_result.status == "FAIL"
+    wt, wl, rt, rl = perf.ost_rw_check(BAD_NAME, str(tmp_path), threads=1)
+    assert wt.status == "FAIL"
+    assert wl.status == "FAIL"
+    assert rt.status == "FAIL"
+    assert rl.status == "FAIL"
 
 
 def test_run_perf_checks_runs_read_and_write_per_ost(tmp_path):
@@ -195,7 +192,7 @@ def test_run_perf_checks_runs_read_and_write_per_ost(tmp_path):
         results = perf.run_perf_checks(topo, str(tmp_path), threads=1)
     kinds = {r.kind for r in results}
     assert kinds == {"throughput", "latency"}
-    # 2 per-OST results (write+read) + 2 pool results (write+read), * 2 kinds = 8
+    # 1 OST check (write+read, 2 kinds) + 1 pool check (write+read, 2 kinds) = 8
     assert len(results) == 8
     io_modes = {r.io_mode for r in results}
     assert io_modes == {"write", "read"}
@@ -265,18 +262,18 @@ def test_pool_rw_check_setstripe_failure(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         return_value=shell_result(1, "", "setstripe error"),
     ), patch("os.remove"):
-        t_result, _ = perf.pool_rw_check("flash", [OST0], str(tmp_path), "write", threads=1)
-    assert t_result.status == "FAIL"
-    assert "setstripe" in t_result.message
+        wt, wl, rt, rl = perf.pool_rw_check("flash", [OST0], str(tmp_path), threads=1)
+    assert wt.status == "FAIL"
+    assert "setstripe" in wt.message
 
 
 def test_pool_rw_check_no_valid_indices(tmp_path):
-    t_result, _ = perf.pool_rw_check("flash", [BAD_NAME], str(tmp_path), "write")
-    assert t_result.status == "FAIL"
-    assert "OST indices" in t_result.message
+    wt, wl, rt, rl = perf.pool_rw_check("flash", [BAD_NAME], str(tmp_path))
+    assert wt.status == "FAIL"
+    assert "OST indices" in wt.message
 
 
-def test_pool_rw_check_single_stripes_each_ost(tmp_path):
+def test_pool_rw_check_single_stripes_each_file_across_osts(tmp_path):
     captured_cmds = []
 
     def fake_run_cmd(args, timeout=30):
@@ -289,18 +286,22 @@ def test_pool_rw_check_single_stripes_each_ost(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=fake_run_cmd,
     ), patch("os.remove"):
-        t_result, _ = perf.pool_rw_check(
-            "(unpooled)", [ost0, ost1], str(tmp_path), "write", threads=4
+        wt, wl, rt, rl = perf.pool_rw_check(
+            "(unpooled)", [ost0, ost1], str(tmp_path), threads=4
         )
 
     setstripe_cmds = [c for c in captured_cmds if c[0] == "lfs"]
-    assert len(setstripe_cmds) == 2
+    # one scratch file per worker thread (never multiplied by OST count)
+    assert len(setstripe_cmds) == 4
     assert all("-i" in c and "-c" in c and "1" in c for c in setstripe_cmds)
-    elbencho_cmd = next(c for c in captured_cmds if "elbencho" in c[0])
-    # threads is never multiplied by OST count -- always the configured total
-    assert elbencho_cmd[elbencho_cmd.index("-t") + 1] == "4"
-    assert t_result.status == "PASS"
-    assert t_result.value == 300.0
+    elbencho_cmds = [c for c in captured_cmds if "elbencho" in c[0]]
+    assert len(elbencho_cmds) == 2  # one write pass, one read pass
+    for cmd in elbencho_cmds:
+        assert cmd[cmd.index("-t") + 1] == "4"
+    assert wt.status == "PASS"
+    assert wt.value == 300.0
+    assert rt.io_mode == "read"
+    assert rt.value == 300.0
 
 
 def test_pool_rw_check_elbencho_failure(tmp_path):
@@ -313,9 +314,9 @@ def test_pool_rw_check_elbencho_failure(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=fake_run_cmd,
     ), patch("os.remove"):
-        t_result, _ = perf.pool_rw_check("flash", [OST0], str(tmp_path), "write", threads=1)
-    assert t_result.status == "FAIL"
-    assert "elbencho" in t_result.message
+        wt, wl, rt, rl = perf.pool_rw_check("flash", [OST0], str(tmp_path), threads=1)
+    assert wt.status == "FAIL"
+    assert "elbencho" in wt.message
 
 
 def test_pool_rw_check_uses_elbencho_max_latency(tmp_path):
@@ -325,17 +326,17 @@ def test_pool_rw_check_uses_elbencho_max_latency(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=_fake_elbencho_run_cmd(rate=100.0, lat_us=100000.0),
     ), patch("os.remove"):
-        _, l_result = perf.pool_rw_check(
-            "flash", [ost0, ost1], str(tmp_path), "write", threads=1
+        wt, wl, rt, rl = perf.pool_rw_check(
+            "flash", [ost0, ost1], str(tmp_path), threads=1
         )
 
-    assert l_result.value == 100.0  # 100000 us -> 100 ms
-    assert l_result.scope == "pool"
+    assert wl.value == 100.0  # 100000 us -> 100 ms
+    assert wl.scope == "pool"
 
 
-def test_pool_rw_check_read_runs_write_pass_first(tmp_path):
-    """A read-mode pool check must first run a write pass to populate every
-    OST's scratch file, then a read pass, using the same scratch paths."""
+def test_pool_rw_check_read_reuses_write_pass_scratch_files(tmp_path):
+    """A pool check must run a write pass to populate every worker thread's
+    scratch file, then a read pass reusing those same scratch paths."""
     captured_cmds = []
 
     def fake_run_cmd(args, timeout=30):
@@ -348,7 +349,7 @@ def test_pool_rw_check_read_runs_write_pass_first(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=fake_run_cmd,
     ), patch("os.remove"):
-        perf.pool_rw_check("flash", [ost0, ost1], str(tmp_path), "read", threads=1)
+        perf.pool_rw_check("flash", [ost0, ost1], str(tmp_path), threads=2)
 
     elbencho_cmds = [c for c in captured_cmds if "elbencho" in c[0]]
     assert len(elbencho_cmds) == 2
@@ -359,6 +360,7 @@ def test_pool_rw_check_read_runs_write_pass_first(tmp_path):
     write_paths = elbencho_cmds[0][elbencho_cmds[0].index("--csvfile") + 2:]
     read_paths = elbencho_cmds[1][elbencho_cmds[1].index("--csvfile") + 2:]
     assert write_paths == read_paths
+    assert len(set(write_paths)) == 2
 
 
 def test_resolve_thresholds_falls_back_to_default():
