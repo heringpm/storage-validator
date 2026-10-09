@@ -177,7 +177,7 @@ def test_ost_rw_check_uses_configured_threads_and_one_file_per_thread(tmp_path):
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=fake_run_cmd,
-    ), patch("os.remove"):
+    ), patch("os.remove"), patch("os.listdir", return_value=[]):
         perf.ost_rw_check(OST0, str(tmp_path), threads=8)
 
     setstripe_cmds = [c for c in captured_cmds if c[0] == "lfs"]
@@ -189,6 +189,10 @@ def test_ost_rw_check_uses_configured_threads_and_one_file_per_thread(tmp_path):
     for cmd in elbencho_cmds:
         assert cmd[cmd.index("-t") + 1] == "8"
         assert "--direct" in cmd
+        # elbencho creates one file per thread directly in the given
+        # directory -- no explicit file list on the command line.
+        assert "--dirs" in cmd and cmd[cmd.index("--dirs") + 1] == "0"
+        assert "--files" in cmd and cmd[cmd.index("--files") + 1] == "1"
     assert "-w" in elbencho_cmds[0]
     assert "--sync" in elbencho_cmds[0]  # fsync before exiting the write pass
     assert "--trunctosize" in elbencho_cmds[0]  # (re)size stale leftover files to the target size
@@ -196,11 +200,10 @@ def test_ost_rw_check_uses_configured_threads_and_one_file_per_thread(tmp_path):
     assert "-w" not in elbencho_cmds[1]
     assert "--sync" not in elbencho_cmds[1]
     assert "--trunctosize" not in elbencho_cmds[1]
-    # Both passes target the same set of per-thread scratch file paths.
-    write_paths = [p for p in elbencho_cmds[0][elbencho_cmds[0].index("--csvfile") + 2:] if p not in ("--sync", "--trunctosize")]
-    read_paths = elbencho_cmds[1][elbencho_cmds[1].index("--csvfile") + 2:]
-    assert write_paths == read_paths
-    assert len(set(write_paths)) == 8
+    # Both passes target the same single scratch directory.
+    write_dir = elbencho_cmds[0][-1]
+    read_dir = elbencho_cmds[1][-1]
+    assert write_dir == read_dir
 
 
 def test_ost_rw_check_defaults_threads_to_detected_cpu_count(tmp_path):
@@ -438,7 +441,7 @@ def test_pool_rw_check_read_reuses_write_pass_scratch_files(tmp_path):
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=fake_run_cmd,
-    ), patch("os.remove"):
+    ), patch("os.remove"), patch("os.listdir", return_value=[]):
         perf.pool_rw_check("flash", [ost0, ost1], str(tmp_path), threads=2)
 
     elbencho_cmds = [c for c in captured_cmds if "elbencho" in c[0]]
@@ -450,11 +453,13 @@ def test_pool_rw_check_read_reuses_write_pass_scratch_files(tmp_path):
     assert "-w" not in elbencho_cmds[1]
     assert "--sync" not in elbencho_cmds[1]
     assert "--trunctosize" not in elbencho_cmds[1]
-    # Both passes target the same scratch file paths.
-    write_paths = [p for p in elbencho_cmds[0][elbencho_cmds[0].index("--csvfile") + 2:] if p not in ("--sync", "--trunctosize")]
-    read_paths = elbencho_cmds[1][elbencho_cmds[1].index("--csvfile") + 2:]
-    assert write_paths == read_paths
-    assert len(set(write_paths)) == 2
+    for cmd in elbencho_cmds:
+        # elbencho creates one file per thread directly in the given
+        # directory -- no explicit file list on the command line.
+        assert "--dirs" in cmd and cmd[cmd.index("--dirs") + 1] == "0"
+        assert "--files" in cmd and cmd[cmd.index("--files") + 1] == "1"
+    # Both passes target the same single scratch directory.
+    assert elbencho_cmds[0][-1] == elbencho_cmds[1][-1]
 
 
 def test_resolve_thresholds_falls_back_to_default():

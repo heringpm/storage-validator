@@ -25,11 +25,13 @@ round-robin allocation across the pool's OSTs instead of us manually
 assigning files to OSTs. If a target has no pool, its directory lives under
 the filesystem name instead (there's no real pool to scope it to).
 
-Every worker thread gets its own dedicated scratch file (one file per
-thread) inside the relevant directory. A check always uses exactly
-`threads` files/threads in total -- never multiplied by the number of OSTs
-in a pool -- so a run on a single system never uses more worker threads
-than the configured/detected CPU thread count.
+Every worker thread gets its own dedicated scratch file inside the relevant
+directory, created and named automatically by elbencho itself (`--dirs 0
+--files 1` against the directory path, rather than us listing out one
+explicit file path per thread on the command line). A check always uses
+exactly `threads` files/threads in total -- never multiplied by the number
+of OSTs in a pool -- so a run on a single system never uses more worker
+threads than the configured/detected CPU thread count.
 
 All subprocess calls go through `shell.run_cmd` so they can be mocked in
 tests.
@@ -152,6 +154,28 @@ def _ensure_striped_dir(path: str, stripe_args: list[str], timeout: float) -> st
     return None
 
 
+def _clear_scratch_dir(path: str) -> None:
+    """Remove every regular file directly inside `path` (the scratch files
+    elbencho created, one per worker thread), leaving the directory itself
+    (and its striping) in place for reuse on the next run.
+
+    No-op in dry-run mode, since nothing was actually written.
+    """
+    if shell.DRY_RUN:
+        return
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        return
+    for name in entries:
+        entry_path = os.path.join(path, name)
+        try:
+            if os.path.isfile(entry_path):
+                os.remove(entry_path)
+        except OSError:
+            pass
+
+
 def _read_elbencho_csv_last_row(csv_path: str, operation: str) -> dict[str, str] | None:
     """Read the row elbencho wrote to its `--csvfile` output for `operation`
     ("WRITE" or "READ").
@@ -174,7 +198,7 @@ def _read_elbencho_csv_last_row(csv_path: str, operation: str) -> dict[str, str]
 
 
 def _run_elbencho_rw(
-    paths: list[str],
+    directory: str,
     mode: IoMode,
     threads: int,
     size: str,
@@ -183,9 +207,14 @@ def _run_elbencho_rw(
     elbencho_path: str,
     timeout: float,
 ) -> tuple[float, float]:
-    """Run one elbencho read or write pass against `paths` with a total of
-    `threads` worker threads (regardless of how many paths are given), and
-    return `(throughput_mibs, latency_us)` parsed from its CSV output.
+    """Run one elbencho read or write pass against `directory` with a total
+    of `threads` worker threads, and return `(throughput_mibs, latency_us)`
+    parsed from its CSV output.
+
+    `--dirs 0 --files 1` tells elbencho to create exactly one file per
+    thread directly inside `directory` (not in per-thread subdirs), with
+    elbencho itself choosing/generating each file's name -- so we never have
+    to list out one explicit file path per thread on the command line.
 
     The write pass adds `--sync`, so elbencho fsyncs each file before
     exiting. Without this, `write()` under `--direct` can return (and our
@@ -214,8 +243,8 @@ def _run_elbencho_rw(
     cmd = [
         elbencho_path, io_flag, "-t", str(threads), "-b", block_size,
         "-s", size, "--direct", "--lat", "--timelimit", str(runtime),
-        "--csvfile", csv_path,
-    ] + extra_flags + paths
+        "--dirs", "0", "--files", "1", "--csvfile", csv_path,
+    ] + extra_flags + [directory]
     if shell.DRY_RUN:
         shell.print_dry_run(cmd)
         try:
@@ -274,26 +303,26 @@ def _fail_quad(
 
 
 def _write_then_read(
-    paths: list[str],
+    directory: str,
+    threads: int,
     size: str,
     block_size: str,
     runtime: int,
     elbencho_path: str,
     timeout: float,
 ) -> tuple[float, float, float, float]:
-    """Run one write pass against `paths` (one file per worker thread), then
-    read that same data back, returning
+    """Run one write pass against `directory` (one file per worker thread,
+    created by elbencho itself), then read that same data back, returning
     `(write_mibs, write_lat_us, read_mibs, read_lat_us)`.
 
     The write pass's data is reused for the read pass instead of writing it
-    twice. `threads` for each pass equals `len(paths)` (one thread per file).
+    twice.
     """
-    threads = len(paths)
     write_rate, write_lat_us = _run_elbencho_rw(
-        paths, "write", threads, size, block_size, runtime, elbencho_path, timeout
+        directory, "write", threads, size, block_size, runtime, elbencho_path, timeout
     )
     read_rate, read_lat_us = _run_elbencho_rw(
-        paths, "read", threads, size, block_size, runtime, elbencho_path, timeout
+        directory, "read", threads, size, block_size, runtime, elbencho_path, timeout
     )
     return write_rate, write_lat_us, read_rate, read_lat_us
 
@@ -340,11 +369,12 @@ def ost_rw_check(
     All scratch files live inside `target`'s persistent scratch directory
     (see `ost_scratch_dir`), which is itself single-striped onto `target`'s
     OST -- so files created inside it inherit that layout automatically and
-    need no per-file `setstripe` call. Each of the `threads` worker threads
-    gets its own dedicated scratch file in that directory. The write pass's
-    data is reused for the read pass, and the scratch files (but not the
-    directory itself, which is reused across runs) are only removed once
-    both passes have completed.
+    need no per-file `setstripe` call. elbencho itself creates one scratch
+    file per worker thread directly inside that directory (`--dirs 0
+    --files 1`), so we never have to list individual file paths on the
+    command line. The write pass's data is reused for the read pass, and the
+    scratch files (but not the directory itself, which is reused across
+    runs) are only removed once both passes have completed.
     """
     threads = threads or detect_cpu_thread_count()
     idx = ost_index(target)
@@ -358,19 +388,14 @@ def ost_rw_check(
     if err:
         return _fail_quad(target.name, err)
 
-    paths = [os.path.join(ost_dir, f"perf_t{i}") for i in range(threads)]
     try:
         write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
-            paths, size, block_size, runtime, elbencho_path, timeout
+            ost_dir, threads, size, block_size, runtime, elbencho_path, timeout
         )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_quad(target.name, f"elbencho failed: {exc}")
     finally:
-        for path in paths:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        _clear_scratch_dir(ost_dir)
 
     return _build_results(
         target.name, write_rate, write_lat_us, read_rate, read_lat_us,
@@ -453,19 +478,14 @@ def pool_rw_check(
     if err:
         return _fail_quad(f"pool:{pool_label}", err, **pool_kwargs)
 
-    paths = [os.path.join(pool_dir, f"perf_t{i}") for i in range(threads)]
     try:
         write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
-            paths, size, block_size, runtime, elbencho_path, timeout
+            pool_dir, threads, size, block_size, runtime, elbencho_path, timeout
         )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_quad(f"pool:{pool_label}", f"elbencho failed: {exc}", **pool_kwargs)
     finally:
-        for path in paths:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+        _clear_scratch_dir(pool_dir)
 
     detail = f"{stripe_count} OSTs, {threads} threads total"
     if shell.DRY_RUN:
