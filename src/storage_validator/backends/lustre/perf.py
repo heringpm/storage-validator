@@ -8,14 +8,28 @@ latency ("IO lat us [max]") from each pass's CSV output -- there is no
 separate latency-only test, and the write pass's data is reused for the
 read pass instead of writing it twice.
 
+Scratch files live under a persistent `.storageval/` directory tree at the
+root of the mount, laid out as:
+
+    <mount>/.storageval/<pool-or-fsname>/<OST name>/   -- per-OST scratch dir
+    <mount>/.storageval/<pool-or-fsname>/pool/         -- per-pool scratch dir
+
+Each of these directories is single-`lfs setstripe`'d *once*, as a
+directory, rather than striping every scratch file individually: an OST's
+directory is striped onto just that one OST, and a pool's directory is
+striped across the whole pool (`-p <pool> -c -1`, or `-c -1` for the
+unpooled default). Every file created inside a directory automatically
+inherits its layout, so individual scratch files need no per-file
+`setstripe` call -- and the pool directory gets Lustre's own real
+round-robin allocation across the pool's OSTs instead of us manually
+assigning files to OSTs. If a target has no pool, its directory lives under
+the filesystem name instead (there's no real pool to scope it to).
+
 Every worker thread gets its own dedicated scratch file (one file per
-thread), rather than all threads sharing a single file. For a per-OST check
-all of a check's files are single-striped onto that one OST; for a per-pool
-check the files are spread as evenly as possible across every OST in the
-pool. Either way, a check always uses exactly `threads` files/threads in
-total -- never multiplied by the number of OSTs in a pool -- so a run on a
-single system never uses more worker threads than the configured/detected
-CPU thread count.
+thread) inside the relevant directory. A check always uses exactly
+`threads` files/threads in total -- never multiplied by the number of OSTs
+in a pool -- so a run on a single system never uses more worker threads
+than the configured/detected CPU thread count.
 
 All subprocess calls go through `shell.run_cmd` so they can be mocked in
 tests.
@@ -50,6 +64,8 @@ DEFAULT_FAIL_MS = 50.0
 
 _OST_INDEX_RE = re.compile(r"OST([0-9a-fA-F]+)$")
 
+STORAGEVAL_DIR = ".storageval"
+
 
 class ElbenchoError(Exception):
     """elbencho ran but failed, or its CSV output couldn't be parsed."""
@@ -79,6 +95,61 @@ def ost_index(target: Target) -> int | None:
     if not match:
         return None
     return int(match.group(1), 16)
+
+
+def _pool_dir_label(pool: str | None, fsname: str) -> str:
+    """Directory name under `.storageval/` for a pool: the real pool name,
+    or the filesystem name if there's no real pool to scope it to.
+    """
+    return pool or fsname
+
+
+def ost_scratch_dir(mount_path: str, fsname: str, target: Target) -> str:
+    """Persistent per-OST scratch directory, single-striped onto just that
+    OST so files created inside it inherit the layout automatically.
+    """
+    return os.path.join(
+        mount_path, STORAGEVAL_DIR, _pool_dir_label(target.pool, fsname), target.name
+    )
+
+
+def pool_scratch_dir(mount_path: str, fsname: str, pool_label: str) -> str:
+    """Persistent per-pool scratch directory, striped across the whole pool
+    (or the unpooled default) so files created inside it are spread across
+    every OST by Lustre's own allocator.
+    """
+    dir_label = fsname if pool_label == "(unpooled)" else pool_label
+    return os.path.join(mount_path, STORAGEVAL_DIR, dir_label, "pool")
+
+
+def _ensure_striped_dir(path: str, stripe_args: list[str], timeout: float) -> str | None:
+    """Create `path` (and parents) if missing, then apply `lfs setstripe
+    <stripe_args> path` so every file later created inside it inherits that
+    layout -- no per-file `setstripe` call needed.
+
+    Idempotent: re-applying the same layout to an already-striped directory
+    is a no-op, so this is safe to call on every run, reusing the directory
+    (and its layout) across runs instead of recreating it each time.
+
+    In dry-run mode, prints the `mkdir`/`lfs setstripe` commands that would
+    be run instead of actually creating/striping anything.
+
+    Returns an error message on failure, else None.
+    """
+    mkdir_cmd = ["mkdir", "-p", path]
+    setstripe_cmd = ["lfs", "setstripe", *stripe_args, path]
+    if shell.DRY_RUN:
+        shell.print_dry_run(mkdir_cmd)
+        shell.print_dry_run(setstripe_cmd)
+        return None
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:
+        return f"mkdir failed for {path}: {exc}"
+    result = shell.run_cmd(setstripe_cmd, timeout=timeout)
+    if not result.ok:
+        return f"lfs setstripe failed for {path}: {result.stderr.strip()}"
+    return None
 
 
 def _read_elbencho_csv_last_row(csv_path: str, operation: str) -> dict[str, str] | None:
@@ -250,6 +321,7 @@ def _build_results(
 def ost_rw_check(
     target: Target,
     mount_path: str,
+    fsname: str = "fs",
     size: str = DEFAULT_SIZE,
     block_size: str = DEFAULT_BLOCK_SIZE,
     runtime: int = DEFAULT_RUNTIME,
@@ -265,10 +337,14 @@ def ost_rw_check(
     read pass against `target`'s OST, returning
     `(write_throughput, write_latency, read_throughput, read_latency)`.
 
-    Each of the `threads` worker threads gets its own dedicated scratch file,
-    all single-striped onto `target`'s OST. The write pass's data is reused
-    for the read pass, and the scratch files are only removed once both
-    passes have completed.
+    All scratch files live inside `target`'s persistent scratch directory
+    (see `ost_scratch_dir`), which is itself single-striped onto `target`'s
+    OST -- so files created inside it inherit that layout automatically and
+    need no per-file `setstripe` call. Each of the `threads` worker threads
+    gets its own dedicated scratch file in that directory. The write pass's
+    data is reused for the read pass, and the scratch files (but not the
+    directory itself, which is reused across runs) are only removed once
+    both passes have completed.
     """
     threads = threads or detect_cpu_thread_count()
     idx = ost_index(target)
@@ -277,20 +353,13 @@ def ost_rw_check(
             target.name, f"could not determine OST index from name {target.name!r}"
         )
 
-    paths = [
-        os.path.join(mount_path, f".storage_validator_perf_{target.name}_t{i}")
-        for i in range(threads)
-    ]
-    try:
-        for path in paths:
-            setstripe_cmd = ["lfs", "setstripe", "-i", str(idx), "-c", "1", path]
-            if shell.DRY_RUN:
-                shell.print_dry_run(setstripe_cmd)
-                continue
-            setstripe = shell.run_cmd(setstripe_cmd, timeout=timeout)
-            if not setstripe.ok:
-                return _fail_quad(target.name, f"lfs setstripe failed: {setstripe.stderr.strip()}")
+    ost_dir = ost_scratch_dir(mount_path, fsname, target)
+    err = _ensure_striped_dir(ost_dir, ["-i", str(idx), "-c", "1"], timeout)
+    if err:
+        return _fail_quad(target.name, err)
 
+    paths = [os.path.join(ost_dir, f"perf_t{i}") for i in range(threads)]
+    try:
         write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
             paths, size, block_size, runtime, elbencho_path, timeout
         )
@@ -335,45 +404,11 @@ def _group_ost_indices(targets: list[Target]) -> list[int]:
     return sorted(indices)
 
 
-def _pool_file_osts(indices: list[int], threads: int) -> list[int]:
-    """Assign each of `threads` per-thread scratch files to an OST index,
-    cycling through `indices` so files are spread as evenly as possible
-    across every OST in the pool (never multiplying thread count by OST
-    count -- the total file/thread count is always exactly `threads`).
-    """
-    return [indices[i % len(indices)] for i in range(threads)]
-
-
-def _pool_ost_paths(pool_label: str, file_osts: list[int], mount_path: str) -> list[str]:
-    """One dedicated scratch file per worker thread, named with both the
-    pool and the OST index it's single-striped onto.
-    """
-    return [
-        os.path.join(mount_path, f".storage_validator_pool_{pool_label}_{idx}_t{i}")
-        for i, idx in enumerate(file_osts)
-    ]
-
-
-def _setstripe_per_file(file_osts: list[int], paths: list[str], timeout: float) -> str | None:
-    """Single-stripe every path onto its assigned OST index.
-
-    Returns an error message if any `lfs setstripe` call fails, else None.
-    """
-    for idx, path in zip(file_osts, paths):
-        setstripe_cmd = ["lfs", "setstripe", "-i", str(idx), "-c", "1", path]
-        if shell.DRY_RUN:
-            shell.print_dry_run(setstripe_cmd)
-            continue
-        result = shell.run_cmd(setstripe_cmd, timeout=timeout)
-        if not result.ok:
-            return f"lfs setstripe failed for OST {idx}: {result.stderr.strip()}"
-    return None
-
-
 def pool_rw_check(
     pool_label: str,
     targets: list[Target],
     mount_path: str,
+    fsname: str = "fs",
     size: str = DEFAULT_SIZE,
     block_size: str = DEFAULT_BLOCK_SIZE,
     runtime: int = DEFAULT_RUNTIME,
@@ -389,12 +424,17 @@ def pool_rw_check(
     read pass across every OST in a pool at once, returning
     `(write_throughput, write_latency, read_throughput, read_latency)`.
 
-    Each of the `threads` worker threads gets its own dedicated scratch file,
-    cycled across every OST in the pool so the files are spread as evenly as
-    possible (total files/threads is always exactly `threads`, never
-    multiplied by OST count). The write pass's data is reused for the read
-    pass, and the scratch files are only removed once both passes have
-    completed.
+    All scratch files live inside the pool's persistent scratch directory
+    (see `pool_scratch_dir`), which is itself striped across the whole pool
+    (`lfs setstripe -p <pool> -c -1`, or `-c -1` for the unpooled default)
+    -- so files created inside it get Lustre's own real round-robin
+    allocation across every OST in the pool, instead of us manually
+    assigning individual files to specific OSTs. This is what makes it a
+    genuine pool-level perf test rather than a simulated one. Each of the
+    `threads` worker threads gets its own dedicated scratch file in that
+    directory. The write pass's data is reused for the read pass, and the
+    scratch files (but not the directory itself, which is reused across
+    runs) are only removed once both passes have completed.
     """
     pool_kwargs = dict(pool=pool_label if pool_label != "(unpooled)" else None, scope="pool")
     indices = _group_ost_indices(targets)
@@ -405,13 +445,16 @@ def pool_rw_check(
 
     threads = threads or detect_cpu_thread_count()
     stripe_count = len(indices)
-    file_osts = _pool_file_osts(indices, threads)
-    paths = _pool_ost_paths(pool_label, file_osts, mount_path)
-    try:
-        err = _setstripe_per_file(file_osts, paths, timeout)
-        if err:
-            return _fail_quad(f"pool:{pool_label}", err, **pool_kwargs)
+    pool_dir = pool_scratch_dir(mount_path, fsname, pool_label)
+    stripe_args = (
+        ["-p", pool_label, "-c", "-1"] if pool_label != "(unpooled)" else ["-c", "-1"]
+    )
+    err = _ensure_striped_dir(pool_dir, stripe_args, timeout)
+    if err:
+        return _fail_quad(f"pool:{pool_label}", err, **pool_kwargs)
 
+    paths = [os.path.join(pool_dir, f"perf_t{i}") for i in range(threads)]
+    try:
         write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
             paths, size, block_size, runtime, elbencho_path, timeout
         )
@@ -483,7 +526,7 @@ def run_perf_checks(
     for target in ost_targets:
         th = resolve_thresholds(target, default_thresholds, pool_thresholds)
         quad = ost_rw_check(
-            target, mount_path, size, block_size, runtime, timeout,
+            target, mount_path, topology.fsname, size, block_size, runtime, timeout,
             warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
             warn_ms=th.warn_ms, fail_ms=th.fail_ms,
             elbencho_path=elbencho_path, threads=threads,
@@ -504,7 +547,7 @@ def run_perf_checks(
             continue
         th = (pool_thresholds or {}).get(pool_label, default_thresholds)
         quad = pool_rw_check(
-            pool_label, group_targets, mount_path, size, block_size, runtime, timeout,
+            pool_label, group_targets, mount_path, topology.fsname, size, block_size, runtime, timeout,
             warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
             warn_ms=th.warn_ms, fail_ms=th.fail_ms,
             elbencho_path=elbencho_path, threads=threads,

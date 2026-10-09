@@ -181,7 +181,9 @@ def test_ost_rw_check_uses_configured_threads_and_one_file_per_thread(tmp_path):
         perf.ost_rw_check(OST0, str(tmp_path), threads=8)
 
     setstripe_cmds = [c for c in captured_cmds if c[0] == "lfs"]
-    assert len(setstripe_cmds) == 8  # one scratch file per worker thread
+    # Only the OST's scratch directory is striped once -- not per file.
+    assert len(setstripe_cmds) == 1
+    assert "-i" in setstripe_cmds[0] and "-c" in setstripe_cmds[0]
     elbencho_cmds = [c for c in captured_cmds if "elbencho" in c[0]]
     assert len(elbencho_cmds) == 2  # one write pass, one read pass
     for cmd in elbencho_cmds:
@@ -360,7 +362,7 @@ def test_pool_rw_check_no_valid_indices(tmp_path):
     assert "OST indices" in wt.message
 
 
-def test_pool_rw_check_single_stripes_each_file_across_osts(tmp_path):
+def test_pool_rw_check_stripes_shared_dir_across_osts(tmp_path):
     captured_cmds = []
 
     def fake_run_cmd(args, timeout=30):
@@ -378,9 +380,10 @@ def test_pool_rw_check_single_stripes_each_file_across_osts(tmp_path):
         )
 
     setstripe_cmds = [c for c in captured_cmds if c[0] == "lfs"]
-    # one scratch file per worker thread (never multiplied by OST count)
-    assert len(setstripe_cmds) == 4
-    assert all("-i" in c and "-c" in c and "1" in c for c in setstripe_cmds)
+    # Only the pool's shared scratch directory is striped once (across all
+    # OSTs via `-c -1`), not per file -- files inside inherit the layout.
+    assert len(setstripe_cmds) == 1
+    assert "-c" in setstripe_cmds[0] and "-1" in setstripe_cmds[0]
     elbencho_cmds = [c for c in captured_cmds if "elbencho" in c[0]]
     assert len(elbencho_cmds) == 2  # one write pass, one read pass
     for cmd in elbencho_cmds:
