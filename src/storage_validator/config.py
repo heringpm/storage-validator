@@ -55,7 +55,7 @@ class PerfConfig:
     perf_threads: Optional[int] = None
     # elbencho `-s` test file size (e.g. "1g"), large enough that the test
     # isn't just measuring client-side page cache.
-    perf_size: str = "1g"
+    perf_size: str = "10g"
     # elbencho `-b` block size (e.g. "1m").
     perf_block_size: str = "1m"
     # elbencho `--timelimit` in seconds, applied to each read/write test run.

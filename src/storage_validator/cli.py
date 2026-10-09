@@ -41,7 +41,7 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
 @click.command()
 @click.option("--backend", default="lustre", show_default=True, help="Storage backend to validate.")
 @click.option("--mount-path", default=None, help="Client mount point to use for perf checks (autodetected if omitted).")
-@click.option("--size", "perf_size", default="1g", show_default=True, help="Size of each read/write elbencho test's dataset (e.g. 1g, 500m, 10g).")
+@click.option("--size", "perf_size", default="10g", show_default=True, help="Size of each read/write elbencho test's dataset (e.g. 1g, 500m, 10g).")
 @click.option("--block-size", default="1m", show_default=True, help="elbencho I/O block size (e.g. 1m, 4k).")
 @click.option("--timelimit", "perf_runtime", default=60, show_default=True, type=int, help="elbencho test runtime (s) per read/write run.")
 @click.option("--timeout", default=90.0, show_default=True, help="Timeout (s) for each perf/health subprocess call.")

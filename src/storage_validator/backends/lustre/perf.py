@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 
 IoMode = Literal["read", "write"]
 
-DEFAULT_SIZE = "1g"
+DEFAULT_SIZE = "10g"
 DEFAULT_BLOCK_SIZE = "1m"
 DEFAULT_RUNTIME = 60
 DEFAULT_WARN_MBPS = 200.0
