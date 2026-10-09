@@ -39,9 +39,12 @@ def run(
     if on_topology:
         on_topology(topology)
 
-    health_results = backend.run_health_checks(topology)
-    if on_health:
-        on_health(health_results)
+    if cfg.skip_health:
+        health_results = []
+    else:
+        health_results = backend.run_health_checks(topology)
+        if on_health:
+            on_health(health_results)
 
     if cfg.skip_perf:
         perf_results = []

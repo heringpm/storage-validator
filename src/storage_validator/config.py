@@ -89,6 +89,7 @@ class PerfConfig:
 class Config:
     backend: str = "lustre"
     skip_perf: bool = False
+    skip_health: bool = False
     dry_run: bool = False
     health: HealthConfig = field(default_factory=HealthConfig)
     perf: PerfConfig = field(default_factory=PerfConfig)

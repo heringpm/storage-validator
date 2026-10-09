@@ -53,6 +53,12 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
 @click.option("--fail-ms", default=50.0, show_default=True, help="Write latency (ms) above which to FAIL.")
 @click.option("--skip-perf", is_flag=True, default=False, help="Skip throughput/latency perf checks.")
 @click.option(
+    "--perf-only",
+    is_flag=True,
+    default=False,
+    help="Run only the perf checks: skip health checks and the topology/health table output, printing just the perf table.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -132,6 +138,7 @@ def main(
     warn_ms: float,
     fail_ms: float,
     skip_perf: bool,
+    perf_only: bool,
     dry_run: bool,
     pool_thresholds: tuple[str, ...],
     elbencho_path: str,
@@ -152,6 +159,7 @@ def main(
     cfg = Config(
         backend=backend,
         skip_perf=skip_perf,
+        skip_health=perf_only,
         dry_run=dry_run,
         health=HealthConfig(warn_pct=warn_pct, fail_pct=fail_pct),
         perf=PerfConfig(
@@ -185,10 +193,12 @@ def main(
         live: Live | None = None
 
         def on_topology(topology) -> None:
-            console.print(console_report.build_topology_table(topology))
+            if not perf_only:
+                console.print(console_report.build_topology_table(topology))
 
         def on_health(health_results) -> None:
-            console.print(console_report.build_health_table(health_results))
+            if not perf_only:
+                console.print(console_report.build_health_table(health_results))
 
         def on_perf_result(quad) -> None:
             nonlocal perf_table, live
