@@ -16,8 +16,8 @@ pip install -e .[dev]
 ```
 
 Requires Python >= 3.9, and the `lfs`/`lctl` Lustre client tools available on
-`PATH` for the `lustre` backend. Pool-level perf checks also require
-[`elbencho`](https://github.com/breuner/elbencho) on `PATH`.
+`PATH` for the `lustre` backend. Perf checks (both per-OST and per-pool) also
+require [`elbencho`](https://github.com/breuner/elbencho) on `PATH`.
 
 ## Usage
 
@@ -52,12 +52,14 @@ storage-validator --warn-pct 75 --fail-pct 90 \
 Use different perf thresholds per Lustre OST pool (e.g. mixed drive types like
 flash vs. archive). Each `--pool-threshold` applies to OSTs in that pool and is
 repeatable; OSTs in pools without an override, or not in any pool, use the
-`--warn-mbps`/`--fail-mbps`/`--warn-ms`/`--fail-ms` defaults. In addition to
-the per-OST `dd` checks, each pool gets a real multi-threaded aggregate test
-using [`elbencho`](https://github.com/breuner/elbencho) (must be installed
-and on `PATH`): one scratch file is single-striped onto each OST in the
-pool, then elbencho drives all of them concurrently with one worker thread
-per file, measuring true aggregate MB/s and worst-case tail latency across
+`--warn-mbps`/`--fail-mbps`/`--warn-ms`/`--fail-ms` defaults. Both the
+per-OST checks and the per-pool checks use
+[`elbencho`](https://github.com/breuner/elbencho) (must be installed and on
+`PATH`) instead of single-threaded `dd`. In addition to the per-OST checks,
+each pool gets a real multi-threaded aggregate test: one scratch file is
+single-striped onto each OST in the pool, then elbencho drives all of them
+concurrently with one worker thread per file, measuring true aggregate MB/s
+and worst-case tail latency across
 the pool — not an average of the independent per-OST results:
 
 ```

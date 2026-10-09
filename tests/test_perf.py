@@ -38,11 +38,37 @@ def shell_result(returncode, stdout="", stderr=""):
     return CommandResult(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+def _fake_single_elbencho_run_cmd(rate=None, lat_us=None):
+    """Fake `run_cmd` for a single-OST `throughput_check`/`latency_check`
+    call: `lfs setstripe` succeeds, `elbencho` writes one fake CSV row.
+    """
+
+    def fake_run_cmd(args, timeout=30):
+        if args[0] == "lfs":
+            return shell_result(0, "", "")
+        if args[0] == "elbencho":
+            csv_path = args[args.index("--csvfile") + 1]
+            with open(csv_path, "w", newline="") as fh:
+                writer = csv.DictWriter(
+                    fh, fieldnames=["MiB/s [last]", "IO lat us [max]"]
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "MiB/s [last]": rate if rate is not None else 300.0,
+                        "IO lat us [max]": lat_us if lat_us is not None else 1000.0,
+                    }
+                )
+            return shell_result(0, "", "")
+        raise AssertionError(f"unexpected args: {args}")
+
+    return fake_run_cmd
+
+
 def test_throughput_check_pass(tmp_path):
-    dd_stderr = "268435456 bytes copied, 1.0 s, 300 MB/s"
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=[_ok(), shell_result(0, "", dd_stderr)],
+        side_effect=_fake_single_elbencho_run_cmd(rate=300.0),
     ), patch("os.remove"):
         result = perf.throughput_check(OST0, str(tmp_path))
     assert result.status == "PASS"
@@ -50,20 +76,18 @@ def test_throughput_check_pass(tmp_path):
 
 
 def test_throughput_check_warn(tmp_path):
-    dd_stderr = "268435456 bytes copied, 1.0 s, 100 MB/s"
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=[_ok(), shell_result(0, "", dd_stderr)],
+        side_effect=_fake_single_elbencho_run_cmd(rate=100.0),
     ), patch("os.remove"):
         result = perf.throughput_check(OST0, str(tmp_path))
     assert result.status == "WARN"
 
 
 def test_throughput_check_fail_low_rate(tmp_path):
-    dd_stderr = "268435456 bytes copied, 1.0 s, 10 MB/s"
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=[_ok(), shell_result(0, "", dd_stderr)],
+        side_effect=_fake_single_elbencho_run_cmd(rate=10.0),
     ), patch("os.remove"):
         result = perf.throughput_check(OST0, str(tmp_path))
     assert result.status == "FAIL"
@@ -79,16 +103,32 @@ def test_throughput_check_setstripe_failure(tmp_path):
     assert "setstripe" in result.message
 
 
+def test_throughput_check_elbencho_failure(tmp_path):
+    def fake_run_cmd(args, timeout=30):
+        if args[0] == "lfs":
+            return shell_result(0, "", "")
+        if args[0] == "elbencho":
+            return shell_result(1, "", "elbencho: command not found")
+        raise AssertionError(args)
+
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"):
+        result = perf.throughput_check(OST0, str(tmp_path))
+    assert result.status == "FAIL"
+    assert "elbencho" in result.message
+
+
 def test_throughput_check_bad_target_name(tmp_path):
     result = perf.throughput_check(BAD_NAME, str(tmp_path))
     assert result.status == "FAIL"
 
 
 def test_latency_check_pass(tmp_path):
-    dd_stderr = "4096 bytes copied, 0.001 s, 4.0 MB/s"
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=[_ok(), shell_result(0, "", dd_stderr)],
+        side_effect=_fake_single_elbencho_run_cmd(lat_us=1000.0),
     ), patch("os.remove"):
         result = perf.latency_check(OST0, str(tmp_path))
     assert result.status == "PASS"
@@ -96,10 +136,9 @@ def test_latency_check_pass(tmp_path):
 
 
 def test_latency_check_fail_slow(tmp_path):
-    dd_stderr = "4096 bytes copied, 0.1 s, 0.04 MB/s"
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=[_ok(), shell_result(0, "", dd_stderr)],
+        side_effect=_fake_single_elbencho_run_cmd(lat_us=100000.0),
     ), patch("os.remove"):
         result = perf.latency_check(OST0, str(tmp_path))
     assert result.status == "FAIL"
@@ -140,7 +179,7 @@ def test_run_perf_checks_runs_both_per_ost(tmp_path):
     topo = Topology(fsname="scratch", osts=[OST0])
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=_combined_fake_run_cmd(),
+        side_effect=_fake_elbencho_run_cmd(),
     ), patch("os.remove"):
         results = perf.run_perf_checks(topo, str(tmp_path))
     kinds = {r.kind for r in results}
@@ -150,21 +189,6 @@ def test_run_perf_checks_runs_both_per_ost(tmp_path):
     pool_results = [r for r in results if r.scope == "pool"]
     assert len(pool_results) == 2
     assert {r.target for r in pool_results} == {"pool:(unpooled)"}
-
-
-def _combined_fake_run_cmd(rate_by_pool=None, lat_us_by_pool=None, dd_rate="bytes copied, 1.0 s, 300 MB/s"):
-    """Fake `run_cmd` covering per-OST `dd` checks AND per-pool `elbencho`
-    checks in one `run_perf_checks` call: `lfs` always succeeds, `dd` always
-    returns `dd_rate`, and `elbencho` behaves like `_fake_elbencho_run_cmd`.
-    """
-    elbencho_fake = _fake_elbencho_run_cmd(rate_by_pool, lat_us_by_pool)
-
-    def fake_run_cmd(args, timeout=30):
-        if args[0] == "dd":
-            return shell_result(0, "", dd_rate)
-        return elbencho_fake(args, timeout=timeout)
-
-    return fake_run_cmd
 
 
 def test_run_perf_checks_aggregates_per_pool_with_custom_thresholds(tmp_path):
@@ -178,13 +202,11 @@ def test_run_perf_checks_aggregates_per_pool_with_custom_thresholds(tmp_path):
     def fake_run_cmd(args, timeout=30):
         if args[0] == "lfs":
             return shell_result(0, "", "")
-        if args[0] == "dd":
-            # flash OST fast, archive OST slow
-            rate = "900 MB/s" if "OST0000" in " ".join(args) else "60 MB/s"
-            return shell_result(0, "", f"bytes copied, 1.0 s, {rate}")
         if args[0] == "elbencho":
             csv_path = args[args.index("--csvfile") + 1]
-            rate = 900.0 if "flash" in " ".join(args) else 60.0
+            joined = " ".join(args)
+            # fast for flash OST/pool, slow for archive OST/pool
+            rate = 900.0 if ("flash" in joined or "OST0000" in joined) else 60.0
             with open(csv_path, "w", newline="") as fh:
                 writer = csv.DictWriter(
                     fh, fieldnames=["MiB/s [last]", "IO lat us [max]"]

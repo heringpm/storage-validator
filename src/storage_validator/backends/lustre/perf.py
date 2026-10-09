@@ -1,18 +1,14 @@
 """Per-OST and per-pool throughput/latency perf checks.
 
-Per-OST checks write a scratch file explicitly striped onto a single target
-OST (`lfs setstripe -i <index> -c 1`) and measure `dd`'s reported transfer
-rate (throughput) or per-write latency. `dd` is single-threaded, which is
-fine for a single-OST sanity check.
-
-Per-pool checks (`pool_throughput_check`/`pool_latency_check`) measure real
-aggregate performance using `elbencho`, a multi-threaded benchmark tool: one
-scratch file is pre-striped onto each OST in the pool individually (`lfs
-setstripe -i <idx> -c 1`), then `elbencho` is run once with one worker thread
-per file, driving every OST in the pool concurrently. This is not an average
-of the independent per-OST `dd` results above — it's a distinct test that
-exercises real parallel/aggregate I/O across the pool using actual
-multi-threaded writers instead of a single `dd` process.
+Both per-OST checks (`throughput_check`/`latency_check`) and per-pool checks
+(`pool_throughput_check`/`pool_latency_check`) measure performance using
+`elbencho`, a multi-threaded benchmark tool, instead of single-threaded `dd`.
+Per-OST checks single-stripe one scratch file onto the target OST (`lfs
+setstripe -i <index> -c 1`) and run `elbencho` with one worker thread against
+it. Per-pool checks pre-stripe one scratch file per OST in the pool
+individually, then run `elbencho` once with one worker thread per file,
+driving every OST in the pool concurrently — a distinct aggregate test, not
+an average of the independent per-OST results.
 
 All subprocess calls go through `shell.run_cmd` so they can be mocked in
 tests.
@@ -84,7 +80,9 @@ def throughput_check(
     warn_mbps: float = DEFAULT_WARN_MBPS,
     fail_mbps: float = DEFAULT_FAIL_MBPS,
 ) -> PerfResult:
-    """Write `size_mb` MiB directly to `target`'s OST and measure throughput."""
+    """Write `size_mb` MiB directly to `target`'s OST and measure throughput
+    using `elbencho` (single worker thread, single-striped onto this OST).
+    """
     idx = ost_index(target)
     if idx is None:
         return PerfResult(
@@ -97,6 +95,9 @@ def throughput_check(
         )
 
     path = os.path.join(mount_path, f".storage_validator_perf_{target.name}")
+    csv_fd, csv_path = tempfile.mkstemp(prefix="storage_validator_elbencho_", suffix=".csv")
+    os.close(csv_fd)
+    os.remove(csv_path)
     try:
         setstripe = shell.run_cmd(
             ["lfs", "setstripe", "-i", str(idx), "-c", "1", path], timeout=timeout
@@ -111,27 +112,28 @@ def throughput_check(
                 message=f"lfs setstripe failed: {setstripe.stderr.strip()}",
             )
 
-        dd_result = shell.run_cmd(
+        result = shell.run_cmd(
             [
-                "dd",
-                "if=/dev/zero",
-                f"of={path}",
-                "bs=1M",
-                f"count={size_mb}",
-                "oflag=direct",
+                "elbencho", "-w", "-t", "1", "-b", "1m",
+                "-s", f"{size_mb}m", "--direct",
+                "--csvfile", csv_path, path,
             ],
             timeout=timeout,
         )
-        rate = parse_dd_rate_mbps(dd_result.stdout + dd_result.stderr)
-        if not dd_result.ok or rate is None:
+        if not result.ok:
             return PerfResult(
-                target=target.name,
-                kind="throughput",
-                value=0.0,
-                unit="MB/s",
+                target=target.name, kind="throughput", value=0.0, unit="MB/s",
                 status="FAIL",
-                message=f"dd failed or unparsable output: {dd_result.stderr.strip()}",
+                message=f"elbencho failed: {(result.stderr or result.stdout).strip()}",
             )
+
+        row = _read_elbencho_csv_last_row(csv_path)
+        if row is None or "MiB/s [last]" not in row:
+            return PerfResult(
+                target=target.name, kind="throughput", value=0.0, unit="MB/s",
+                status="FAIL", message="could not parse elbencho CSV output",
+            )
+        rate = float(row["MiB/s [last]"])
 
         if rate < fail_mbps:
             status, msg = "FAIL", f"{rate:.1f} MB/s below fail threshold {fail_mbps}"
@@ -153,6 +155,10 @@ def throughput_check(
             os.remove(path)
         except OSError:
             pass
+        try:
+            os.remove(csv_path)
+        except OSError:
+            pass
 
 
 def latency_check(
@@ -162,7 +168,9 @@ def latency_check(
     warn_ms: float = DEFAULT_WARN_MS,
     fail_ms: float = DEFAULT_FAIL_MS,
 ) -> PerfResult:
-    """Measure single 4K synced-write latency on `target`'s OST via `dd`."""
+    """Measure single 4K direct-write latency on `target`'s OST using
+    `elbencho` (single worker thread, single-striped onto this OST).
+    """
     idx = ost_index(target)
     if idx is None:
         return PerfResult(
@@ -172,6 +180,9 @@ def latency_check(
         )
 
     path = os.path.join(mount_path, f".storage_validator_lat_{target.name}")
+    csv_fd, csv_path = tempfile.mkstemp(prefix="storage_validator_elbencho_", suffix=".csv")
+    os.close(csv_fd)
+    os.remove(csv_path)
     try:
         setstripe = shell.run_cmd(
             ["lfs", "setstripe", "-i", str(idx), "-c", "1", path], timeout=timeout
@@ -182,20 +193,28 @@ def latency_check(
                 status="FAIL", message=f"lfs setstripe failed: {setstripe.stderr.strip()}",
             )
 
-        dd_result = shell.run_cmd(
+        result = shell.run_cmd(
             [
-                "dd", "if=/dev/zero", f"of={path}", "bs=4k", "count=1",
-                "oflag=direct,sync",
+                "elbencho", "-w", "-t", "1", "-b", "4k",
+                "-s", "4k", "--direct",
+                "--csvfile", csv_path, path,
             ],
             timeout=timeout,
         )
-        rate_match = _DD_RATE_RE.search(dd_result.stdout + dd_result.stderr)
-        if not dd_result.ok or not rate_match:
+        if not result.ok:
             return PerfResult(
                 target=target.name, kind="latency", value=0.0, unit="ms",
-                status="FAIL", message=f"dd failed or unparsable output: {dd_result.stderr.strip()}",
+                status="FAIL",
+                message=f"elbencho failed: {(result.stderr or result.stdout).strip()}",
             )
-        latency_ms = float(rate_match.group("seconds")) * 1000.0
+
+        row = _read_elbencho_csv_last_row(csv_path)
+        if row is None or "IO lat us [max]" not in row:
+            return PerfResult(
+                target=target.name, kind="latency", value=0.0, unit="ms",
+                status="FAIL", message="could not parse elbencho CSV output",
+            )
+        latency_ms = float(row["IO lat us [max]"]) / 1000.0
 
         if latency_ms > fail_ms:
             status, msg = "FAIL", f"{latency_ms:.2f} ms above fail threshold {fail_ms}"
@@ -215,6 +234,10 @@ def latency_check(
     finally:
         try:
             os.remove(path)
+        except OSError:
+            pass
+        try:
+            os.remove(csv_path)
         except OSError:
             pass
 
@@ -478,7 +501,7 @@ def run_perf_checks(
     single-striped scratch file per OST, driven concurrently by one
     elbencho worker thread per file, so the pool result reflects actual
     multi-threaded aggregate bandwidth/tail latency rather than an average
-    of independent single-OST `dd` tests. Each pool's own thresholds are
+    of independent single-OST tests. Each pool's own thresholds are
     used so different drive types (e.g. ssd vs hdd pools) aren't judged
     against the same bar.
     """
