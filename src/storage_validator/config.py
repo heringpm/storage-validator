@@ -67,6 +67,13 @@ class PerfConfig:
     # If non-empty, restrict per-pool perf checks to only these pool names.
     # Per-OST checks are unaffected -- see `ost_names` above.
     pool_names: Optional[set[str]] = None
+    # Extra hosts (reachable via passwordless SSH) to run elbencho on in
+    # distributed mode alongside the local client, for maxing out
+    # throughput beyond what one client can push. An `elbencho --daemon` is
+    # started on each host before testing and stopped afterwards. Populated
+    # from `--hosts` (comma-separated) and/or `--hosts-file` (one host per
+    # line) on the CLI.
+    hosts: Optional[list[str]] = None
 
     @property
     def default_thresholds(self) -> PerfThresholds:

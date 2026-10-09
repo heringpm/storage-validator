@@ -99,6 +99,23 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
     metavar="NAME",
     help="Restrict perf checks (both per-OST and per-pool) to this OST pool name. Repeatable.",
 )
+@click.option(
+    "--hosts",
+    default=None,
+    metavar="HOST1,HOST2,...",
+    help=(
+        "Comma-separated list of extra hosts (reachable via passwordless SSH) "
+        "to run elbencho on in distributed mode alongside this client, for "
+        "maxing out throughput beyond one client. An elbencho daemon is "
+        "started on each host before testing and stopped afterwards."
+    ),
+)
+@click.option(
+    "--hosts-file",
+    default=None,
+    type=click.Path(dir_okay=False, exists=True),
+    help="Path to a file with one hostname per line, added to --hosts.",
+)
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress the console table output.")
 def main(
@@ -121,11 +138,17 @@ def main(
     perf_threads: int | None,
     ost_names: tuple[str, ...],
     pool_names: tuple[str, ...],
+    hosts: str | None,
+    hosts_file: str | None,
     json_path: str | None,
     quiet: bool,
 ) -> None:
     """Validate a storage filesystem: discovery, health checks, perf checks."""
     parsed_pool_thresholds = dict(_parse_pool_threshold(raw) for raw in pool_thresholds)
+    parsed_hosts = [h.strip() for h in (hosts or "").split(",") if h.strip()]
+    if hosts_file:
+        with open(hosts_file) as f:
+            parsed_hosts.extend(line.strip() for line in f if line.strip())
     cfg = Config(
         backend=backend,
         skip_perf=skip_perf,
@@ -146,6 +169,7 @@ def main(
             perf_threads=perf_threads,
             ost_names=set(ost_names) or None,
             pool_names=set(pool_names) or None,
+            hosts=parsed_hosts or None,
         ),
     )
 

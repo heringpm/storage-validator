@@ -154,6 +154,60 @@ def _ensure_striped_dir(path: str, stripe_args: list[str], timeout: float) -> st
     return None
 
 
+_DAEMON_LOG_PATH = "/tmp/storage_validator_elbencho_daemon.log"
+
+
+def start_elbencho_daemons(
+    hosts: list[str], elbencho_path: str = "elbencho", timeout: float = 30
+) -> list[str]:
+    """SSH to each of `hosts` and start a detached `elbencho --daemon`
+    process (logging to `_DAEMON_LOG_PATH` on that host), so a later
+    `elbencho --hosts h1,h2,...` invocation can coordinate a distributed
+    benchmark across all of them.
+
+    Returns the list of hosts that failed to start (empty if all succeeded).
+    In dry-run mode, prints the `ssh` commands instead of running them and
+    returns an empty list.
+    """
+    failed = []
+    for host in hosts:
+        remote_cmd = (
+            f"nohup {elbencho_path} --daemon > {_DAEMON_LOG_PATH} 2>&1 < /dev/null &"
+        )
+        cmd = ["ssh", "-f", host, remote_cmd]
+        if shell.DRY_RUN:
+            shell.print_dry_run(cmd)
+            continue
+        try:
+            result = shell.run_cmd(cmd, timeout=timeout)
+        except shell.CommandError:
+            failed.append(host)
+            continue
+        if not result.ok:
+            failed.append(host)
+    return failed
+
+
+def stop_elbencho_daemons(
+    hosts: list[str], timeout: float = 30
+) -> None:
+    """SSH to each of `hosts` and kill its `elbencho --daemon` process.
+
+    Best-effort: a host with no running daemon (or an unreachable host)
+    doesn't raise -- this is cleanup, not a check that must pass. No-op in
+    dry-run mode other than printing the commands.
+    """
+    for host in hosts:
+        cmd = ["ssh", host, "pkill", "-f", "elbencho --daemon"]
+        if shell.DRY_RUN:
+            shell.print_dry_run(cmd)
+            continue
+        try:
+            shell.run_cmd(cmd, timeout=timeout)
+        except shell.CommandError:
+            pass
+
+
 def _clear_scratch_dir(path: str) -> None:
     """Remove every regular file directly inside `path` (the scratch files
     elbencho created, one per worker thread), leaving the directory itself
@@ -206,15 +260,22 @@ def _run_elbencho_rw(
     runtime: int,
     elbencho_path: str,
     timeout: float,
+    hosts: list[str] | None = None,
 ) -> tuple[float, float]:
     """Run one elbencho read or write pass against `directory` with a total
-    of `threads` worker threads, and return `(throughput_mibs, latency_us)`
-    parsed from its CSV output.
+    of `threads` worker threads per participating host, and return
+    `(throughput_mibs, latency_us)` parsed from its CSV output.
 
     `--dirs 0 --files 1` tells elbencho to create exactly one file per
     thread directly inside `directory` (not in per-thread subdirs), with
     elbencho itself choosing/generating each file's name -- so we never have
     to list out one explicit file path per thread on the command line.
+
+    If `hosts` is given, elbencho is run in distributed mode (`--hosts
+    h1,h2,...`), coordinating an `elbencho --daemon` already running on each
+    host (see `start_elbencho_daemons`) so the combined throughput of every
+    host hitting the filesystem at once is measured, instead of just one
+    client's local thread count.
 
     The write pass adds `--sync`, so elbencho fsyncs each file before
     exiting. Without this, `write()` under `--direct` can return (and our
@@ -240,11 +301,12 @@ def _run_elbencho_rw(
     csv_fd, csv_path = tempfile.mkstemp(prefix="storage_validator_elbencho_", suffix=".csv")
     os.close(csv_fd)
     os.remove(csv_path)
+    host_flags = ["--hosts", ",".join(hosts)] if hosts else []
     cmd = [
         elbencho_path, io_flag, "-t", str(threads), "-b", block_size,
         "-s", size, "--direct", "--lat", "--timelimit", str(runtime),
         "--dirs", "0", "--files", "1", "--csvfile", csv_path,
-    ] + extra_flags + [directory]
+    ] + host_flags + extra_flags + [directory]
     if shell.DRY_RUN:
         shell.print_dry_run(cmd)
         try:
@@ -310,19 +372,21 @@ def _write_then_read(
     runtime: int,
     elbencho_path: str,
     timeout: float,
+    hosts: list[str] | None = None,
 ) -> tuple[float, float, float, float]:
     """Run one write pass against `directory` (one file per worker thread,
     created by elbencho itself), then read that same data back, returning
     `(write_mibs, write_lat_us, read_mibs, read_lat_us)`.
 
     The write pass's data is reused for the read pass instead of writing it
-    twice.
+    twice. If `hosts` is given, both passes run across every host at once
+    (see `_run_elbencho_rw`).
     """
     write_rate, write_lat_us = _run_elbencho_rw(
-        directory, "write", threads, size, block_size, runtime, elbencho_path, timeout
+        directory, "write", threads, size, block_size, runtime, elbencho_path, timeout, hosts
     )
     read_rate, read_lat_us = _run_elbencho_rw(
-        directory, "read", threads, size, block_size, runtime, elbencho_path, timeout
+        directory, "read", threads, size, block_size, runtime, elbencho_path, timeout, hosts
     )
     return write_rate, write_lat_us, read_rate, read_lat_us
 
@@ -361,6 +425,7 @@ def ost_rw_check(
     fail_ms: float = DEFAULT_FAIL_MS,
     elbencho_path: str = "elbencho",
     threads: int | None = None,
+    hosts: list[str] | None = None,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
     read pass against `target`'s OST, returning
@@ -375,6 +440,11 @@ def ost_rw_check(
     command line. The write pass's data is reused for the read pass, and the
     scratch files (but not the directory itself, which is reused across
     runs) are only removed once both passes have completed.
+
+    If `hosts` is given, every host runs `threads` worker threads against
+    the same shared `ost_dir` at once (see `_run_elbencho_rw`), measuring
+    this OST's throughput under combined load from every client instead of
+    just this one.
     """
     threads = threads or detect_cpu_thread_count()
     idx = ost_index(target)
@@ -390,7 +460,7 @@ def ost_rw_check(
 
     try:
         write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
-            ost_dir, threads, size, block_size, runtime, elbencho_path, timeout
+            ost_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts
         )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_quad(target.name, f"elbencho failed: {exc}")
@@ -444,6 +514,7 @@ def pool_rw_check(
     fail_ms: float = DEFAULT_FAIL_MS,
     elbencho_path: str = "elbencho",
     threads: int | None = None,
+    hosts: list[str] | None = None,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
     read pass across every OST in a pool at once, returning
@@ -460,6 +531,10 @@ def pool_rw_check(
     directory. The write pass's data is reused for the read pass, and the
     scratch files (but not the directory itself, which is reused across
     runs) are only removed once both passes have completed.
+
+    If `hosts` is given, every host runs `threads` worker threads against
+    the shared `pool_dir` at once (see `_run_elbencho_rw`), measuring the
+    pool's combined throughput under load from every client at once.
     """
     pool_kwargs = dict(pool=pool_label if pool_label != "(unpooled)" else None, scope="pool")
     indices = _group_ost_indices(targets)
@@ -480,7 +555,7 @@ def pool_rw_check(
 
     try:
         write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
-            pool_dir, threads, size, block_size, runtime, elbencho_path, timeout
+            pool_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts
         )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_quad(f"pool:{pool_label}", f"elbencho failed: {exc}", **pool_kwargs)
@@ -488,6 +563,8 @@ def pool_rw_check(
         _clear_scratch_dir(pool_dir)
 
     detail = f"{stripe_count} OSTs, {threads} threads total"
+    if hosts:
+        detail += f", {len(hosts)} hosts"
     if shell.DRY_RUN:
         detail += ", dry run, no real data"
     return _build_results(
@@ -509,6 +586,7 @@ def run_perf_checks(
     threads: int | None = None,
     ost_names: set[str] | None = None,
     pool_names: set[str] | None = None,
+    hosts: list[str] | None = None,
     on_result: Callable[[tuple[PerfResult, PerfResult, PerfResult, PerfResult]], None] | None = None,
 ) -> list[PerfResult]:
     """Run one write+read throughput/latency check against every OST in the
@@ -516,11 +594,12 @@ def run_perf_checks(
     pool (plus one for any OSTs that aren't in a pool).
 
     Every single check (per-OST or per-pool) uses `threads` worker
-    threads/files in total -- never multiplied by the number of OSTs in a
-    pool -- so a run never exceeds the host's thread count (detected once
-    via `lscpu`, or the `threads` override) regardless of topology size.
-    Each pool's own thresholds are used so different drive types (e.g. ssd
-    vs hdd pools) aren't judged against the same bar.
+    threads/files in total per participating host -- never multiplied by
+    the number of OSTs in a pool -- so a run never exceeds the host's
+    thread count (detected once via `lscpu`, or the `threads` override)
+    regardless of topology size. Each pool's own thresholds are used so
+    different drive types (e.g. ssd vs hdd pools) aren't judged against the
+    same bar.
 
     `ost_names`, if given, restricts per-OST checks to only the named OSTs
     (matched against `Target.name`). `pool_names`, if given, restricts both
@@ -530,6 +609,14 @@ def run_perf_checks(
     only `ost_names` still runs per-pool checks for every pool, using all
     of that pool's OSTs, not just the named ones.
 
+    If `hosts` is given (a list of hostnames/IPs reachable via passwordless
+    SSH), an `elbencho --daemon` is started on each host before any checks
+    run (and stopped again afterwards, even if a check fails), and every
+    `elbencho` invocation runs in distributed mode across all of them at
+    once (`--hosts h1,h2,...`) -- so each check measures combined
+    throughput from every host hitting the filesystem simultaneously,
+    instead of just the local client.
+
     If `on_result` is given, it's called with each check's 4-tuple of
     results (write throughput/latency, read throughput/latency) as soon as
     that check finishes, so a caller can stream results instead of waiting
@@ -538,41 +625,58 @@ def run_perf_checks(
     default_thresholds = default_thresholds or PerfThresholds()
     threads = threads or detect_cpu_thread_count()
     results: list[PerfResult] = []
-    ost_targets = topology.osts
-    if ost_names:
-        ost_targets = [t for t in ost_targets if t.name in ost_names]
-    if pool_names:
-        ost_targets = [t for t in ost_targets if (t.pool or "(unpooled)") in pool_names]
-    for target in ost_targets:
-        th = resolve_thresholds(target, default_thresholds, pool_thresholds)
-        quad = ost_rw_check(
-            target, mount_path, topology.fsname, size, block_size, runtime, timeout,
-            warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
-            warn_ms=th.warn_ms, fail_ms=th.fail_ms,
-            elbencho_path=elbencho_path, threads=threads,
-        )
-        for result in quad:
-            result.pool = target.pool
-            results.append(result)
-        if on_result:
-            on_result(quad)
 
-    groups: dict[str, list[Target]] = defaultdict(list)
-    for target in topology.osts:
-        pool_label = target.pool or "(unpooled)"
-        groups[pool_label].append(target)
+    if hosts:
+        failed_hosts = start_elbencho_daemons(hosts, elbencho_path, timeout)
+        if failed_hosts:
+            log.warning(
+                "failed to start elbencho daemon on: %s -- continuing without them",
+                ", ".join(failed_hosts),
+            )
+            hosts = [h for h in hosts if h not in failed_hosts]
+        if not hosts:
+            hosts = None
 
-    for pool_label, group_targets in groups.items():
-        if pool_names and pool_label not in pool_names:
-            continue
-        th = (pool_thresholds or {}).get(pool_label, default_thresholds)
-        quad = pool_rw_check(
-            pool_label, group_targets, mount_path, topology.fsname, size, block_size, runtime, timeout,
-            warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
-            warn_ms=th.warn_ms, fail_ms=th.fail_ms,
-            elbencho_path=elbencho_path, threads=threads,
-        )
-        results.extend(quad)
-        if on_result:
-            on_result(quad)
+    try:
+        ost_targets = topology.osts
+        if ost_names:
+            ost_targets = [t for t in ost_targets if t.name in ost_names]
+        if pool_names:
+            ost_targets = [t for t in ost_targets if (t.pool or "(unpooled)") in pool_names]
+        for target in ost_targets:
+            th = resolve_thresholds(target, default_thresholds, pool_thresholds)
+            quad = ost_rw_check(
+                target, mount_path, topology.fsname, size, block_size, runtime, timeout,
+                warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
+                warn_ms=th.warn_ms, fail_ms=th.fail_ms,
+                elbencho_path=elbencho_path, threads=threads, hosts=hosts,
+            )
+            for result in quad:
+                result.pool = target.pool
+                results.append(result)
+            if on_result:
+                on_result(quad)
+
+        groups: dict[str, list[Target]] = defaultdict(list)
+        for target in topology.osts:
+            pool_label = target.pool or "(unpooled)"
+            groups[pool_label].append(target)
+
+        for pool_label, group_targets in groups.items():
+            if pool_names and pool_label not in pool_names:
+                continue
+            th = (pool_thresholds or {}).get(pool_label, default_thresholds)
+            quad = pool_rw_check(
+                pool_label, group_targets, mount_path, topology.fsname, size, block_size, runtime, timeout,
+                warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
+                warn_ms=th.warn_ms, fail_ms=th.fail_ms,
+                elbencho_path=elbencho_path, threads=threads, hosts=hosts,
+            )
+            results.extend(quad)
+            if on_result:
+                on_result(quad)
+    finally:
+        if hosts:
+            stop_elbencho_daemons(hosts, timeout)
+
     return results
