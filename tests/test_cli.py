@@ -137,6 +137,48 @@ def test_cli_defaults_perf_threads_to_none():
     assert captured["cfg"].perf.perf_threads is None
 
 
+def test_cli_parses_ost_and_pool_filter_options():
+    runner = CliRunner()
+    captured = {}
+
+    def fake_run(cfg):
+        captured["cfg"] = cfg
+        return make_report()
+
+    with patch("storage_validator.cli.engine.run", side_effect=fake_run):
+        result = runner.invoke(
+            main,
+            [
+                "--skip-perf",
+                "--quiet",
+                "--ost",
+                "scratch-OST0000",
+                "--ost",
+                "scratch-OST0001",
+                "--pool",
+                "flash",
+            ],
+        )
+    assert result.exit_code == 0
+    assert captured["cfg"].perf.ost_names == {"scratch-OST0000", "scratch-OST0001"}
+    assert captured["cfg"].perf.pool_names == {"flash"}
+
+
+def test_cli_defaults_ost_and_pool_filters_to_none():
+    runner = CliRunner()
+    captured = {}
+
+    def fake_run(cfg):
+        captured["cfg"] = cfg
+        return make_report()
+
+    with patch("storage_validator.cli.engine.run", side_effect=fake_run):
+        result = runner.invoke(main, ["--skip-perf", "--quiet"])
+    assert result.exit_code == 0
+    assert captured["cfg"].perf.ost_names is None
+    assert captured["cfg"].perf.pool_names is None
+
+
 def test_cli_rejects_malformed_pool_threshold():
     runner = CliRunner()
     with patch("storage_validator.cli.engine.run", return_value=make_report()):

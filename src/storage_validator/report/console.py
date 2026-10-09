@@ -60,16 +60,57 @@ def build_health_table(results: list[CheckResult]) -> Table:
     return table
 
 
-def build_perf_table(results: list[PerfResult]) -> Table:
-    table = Table(title="Performance Checks")
+def _add_perf_columns(table: Table) -> None:
     table.add_column("Target")
     table.add_column("I/O")
-    table.add_column("Kind")
-    table.add_column("Value")
-    table.add_column("Status")
+    table.add_column("Throughput")
+    table.add_column("Tput Status")
+    table.add_column("Latency")
+    table.add_column("Lat Status")
     table.add_column("Message")
+
+
+def _add_perf_row(table: Table, throughput: PerfResult | None, latency: PerfResult | None) -> None:
+    """Append one combined row for a throughput+latency pair (same target
+    and io_mode), with throughput and latency each in their own columns.
+    Either `throughput` or `latency` may be None if a pair couldn't be
+    matched, in which case that column shows "-".
+    """
+    anchor = throughput or latency
+    table.add_row(
+        anchor.target,
+        anchor.io_mode,
+        f"{throughput.value:.2f} {throughput.unit}" if throughput else "-",
+        _styled_status(throughput.status) if throughput else "-",
+        f"{latency.value:.2f} {latency.unit}" if latency else "-",
+        _styled_status(latency.status) if latency else "-",
+        " / ".join(
+            escape(r.message) for r in (throughput, latency) if r and r.message
+        ),
+    )
+
+
+def build_perf_table(results: list[PerfResult]) -> Table:
+    """Build a perf table with one row per (target, io_mode) pair, showing
+    throughput and latency side by side in separate columns instead of as
+    separate rows.
+    """
+    table = Table(title="Performance Checks")
+    _add_perf_columns(table)
+    pending: dict[tuple, PerfResult] = {}
     for result in results:
-        add_perf_row(table, result)
+        key = (result.target, result.io_mode)
+        other = pending.pop(key, None)
+        if other is None:
+            pending[key] = result
+            continue
+        tp, lat = (result, other) if result.kind == "throughput" else (other, result)
+        _add_perf_row(table, tp, lat)
+    for result in pending.values():
+        if result.kind == "throughput":
+            _add_perf_row(table, result, None)
+        else:
+            _add_perf_row(table, None, result)
     return table
 
 
@@ -84,16 +125,16 @@ def render_report(report: Report, console: Console | None = None) -> None:
     console.print(f"Overall status: {_styled_status(overall)}")
 
 
-def add_perf_row(table: Table, result: PerfResult) -> None:
-    """Append one `PerfResult` as a row to a perf table built with
-    `build_perf_table`/`Table()`, used to stream rows in as checks finish
-    instead of only rendering the full table once every check is done.
+def add_perf_quad_rows(
+    table: Table,
+    quad: tuple[PerfResult, PerfResult, PerfResult, PerfResult],
+) -> None:
+    """Append two rows (one for write, one for read) to a perf table built
+    with `build_perf_table`/`_add_perf_columns`, from a single check's
+    `(write_throughput, write_latency, read_throughput, read_latency)`
+    result tuple. Used to stream rows in as checks finish instead of only
+    rendering the full table once every check is done.
     """
-    table.add_row(
-        result.target,
-        result.io_mode,
-        result.kind,
-        f"{result.value:.2f} {result.unit}",
-        _styled_status(result.status),
-        escape(result.message),
-    )
+    write_tp, write_lat, read_tp, read_lat = quad
+    _add_perf_row(table, write_tp, write_lat)
+    _add_perf_row(table, read_tp, read_lat)

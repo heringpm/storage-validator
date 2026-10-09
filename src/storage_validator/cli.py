@@ -79,6 +79,20 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
         "count (from `lscpu`)."
     ),
 )
+@click.option(
+    "--ost",
+    "ost_names",
+    multiple=True,
+    metavar="NAME",
+    help="Restrict per-OST perf checks to this OST name (e.g. scratch-OST0000). Repeatable. Per-pool checks are unaffected.",
+)
+@click.option(
+    "--pool",
+    "pool_names",
+    multiple=True,
+    metavar="NAME",
+    help="Restrict per-pool perf checks to this OST pool name. Repeatable. Per-OST checks are unaffected.",
+)
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress the console table output.")
 def main(
@@ -98,6 +112,8 @@ def main(
     pool_thresholds: tuple[str, ...],
     elbencho_path: str,
     perf_threads: int | None,
+    ost_names: tuple[str, ...],
+    pool_names: tuple[str, ...],
     json_path: str | None,
     quiet: bool,
 ) -> None:
@@ -120,6 +136,8 @@ def main(
             pool_thresholds=parsed_pool_thresholds,
             elbencho_path=elbencho_path,
             perf_threads=perf_threads,
+            ost_names=set(ost_names) or None,
+            pool_names=set(pool_names) or None,
         ),
     )
 
@@ -142,8 +160,7 @@ def main(
                 perf_table = console_report.build_perf_table([])
                 live = Live(perf_table, console=console, refresh_per_second=4)
                 live.start()
-            for result in quad:
-                console_report.add_perf_row(perf_table, result)
+            console_report.add_perf_quad_rows(perf_table, quad)
             live.refresh()
 
         report = engine.run(

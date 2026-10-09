@@ -52,3 +52,40 @@ def test_overall_status_reflects_worst_result():
     report = make_report()
     report.health.append(CheckResult(name="x", status="FAIL", message="bad"))
     assert report.overall_status() == "FAIL"
+
+
+def test_build_perf_table_combines_throughput_and_latency_into_one_row():
+    results = [
+        PerfResult(target="scratch-OST0000", kind="throughput", value=300.0, unit="MB/s", status="PASS", io_mode="write"),
+        PerfResult(target="scratch-OST0000", kind="latency", value=1.0, unit="ms", status="PASS", io_mode="write"),
+        PerfResult(target="scratch-OST0000", kind="throughput", value=250.0, unit="MB/s", status="PASS", io_mode="read"),
+        PerfResult(target="scratch-OST0000", kind="latency", value=2.0, unit="ms", status="PASS", io_mode="read"),
+    ]
+    console = Console(record=True, width=160)
+    console.print(console_report.build_perf_table(results))
+    text = console.export_text()
+    # One row per io_mode (write, read), not one row per kind -- so the
+    # OST name should appear exactly twice, each row showing both the
+    # throughput and latency value together.
+    assert text.count("scratch-OST0000") == 2
+    assert "300.00 MB/s" in text
+    assert "1.00 ms" in text
+    assert "250.00 MB/s" in text
+    assert "2.00 ms" in text
+
+
+def test_add_perf_quad_rows_appends_write_and_read_rows():
+    from rich.table import Table
+
+    from storage_validator.report.console import _add_perf_columns
+
+    quad = (
+        PerfResult(target="scratch-OST0000", kind="throughput", value=300.0, unit="MB/s", status="PASS", io_mode="write"),
+        PerfResult(target="scratch-OST0000", kind="latency", value=1.0, unit="ms", status="PASS", io_mode="write"),
+        PerfResult(target="scratch-OST0000", kind="throughput", value=250.0, unit="MB/s", status="PASS", io_mode="read"),
+        PerfResult(target="scratch-OST0000", kind="latency", value=2.0, unit="ms", status="PASS", io_mode="read"),
+    )
+    table = Table()
+    _add_perf_columns(table)
+    console_report.add_perf_quad_rows(table, quad)
+    assert table.row_count == 2

@@ -60,6 +60,13 @@ class PerfConfig:
     perf_block_size: str = "1m"
     # elbencho `--timelimit` in seconds, applied to each read/write test run.
     perf_runtime: int = 60
+    # If non-empty, restrict per-OST perf checks to only these OST names
+    # (e.g. {"scratch-OST0000"}). Per-pool checks are unaffected -- see
+    # `pool_names` below.
+    ost_names: Optional[set[str]] = None
+    # If non-empty, restrict per-pool perf checks to only these pool names.
+    # Per-OST checks are unaffected -- see `ost_names` above.
+    pool_names: Optional[set[str]] = None
 
     @property
     def default_thresholds(self) -> PerfThresholds:

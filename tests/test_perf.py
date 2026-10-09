@@ -222,6 +222,46 @@ def test_run_perf_checks_runs_read_and_write_per_ost(tmp_path):
     assert {r.target for r in pool_results} == {"pool:(unpooled)"}
 
 
+def test_run_perf_checks_ost_names_filters_per_ost_checks_only(tmp_path):
+    from storage_validator.models import Topology
+
+    ost0 = Target(name="scratch-OST0000", kind="ost", pool="flash")
+    ost1 = Target(name="scratch-OST0001", kind="ost", pool="flash")
+    topo = Topology(fsname="scratch", osts=[ost0, ost1])
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=_fake_elbencho_run_cmd(),
+    ), patch("os.remove"):
+        results = perf.run_perf_checks(
+            topo, str(tmp_path), threads=1, ost_names={"scratch-OST0000"}
+        )
+    ost_results = [r for r in results if r.scope == "ost"]
+    pool_results = [r for r in results if r.scope == "pool"]
+    assert {r.target for r in ost_results} == {"scratch-OST0000"}
+    # Pool check is unaffected by ost_names: still aggregates both OSTs in "flash".
+    assert {r.target for r in pool_results} == {"pool:flash"}
+
+
+def test_run_perf_checks_pool_names_filters_per_pool_checks_only(tmp_path):
+    from storage_validator.models import Topology
+
+    flash = Target(name="scratch-OST0000", kind="ost", pool="flash")
+    archive = Target(name="scratch-OST0001", kind="ost", pool="archive")
+    topo = Topology(fsname="scratch", osts=[flash, archive])
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=_fake_elbencho_run_cmd(),
+    ), patch("os.remove"):
+        results = perf.run_perf_checks(
+            topo, str(tmp_path), threads=1, pool_names={"flash"}
+        )
+    ost_results = [r for r in results if r.scope == "ost"]
+    pool_results = [r for r in results if r.scope == "pool"]
+    # Per-OST checks are unaffected by pool_names: both OSTs still checked.
+    assert {r.target for r in ost_results} == {"scratch-OST0000", "scratch-OST0001"}
+    assert {r.target for r in pool_results} == {"pool:flash"}
+
+
 def test_run_perf_checks_aggregates_per_pool_with_custom_thresholds(tmp_path):
     from storage_validator.config import PerfThresholds
     from storage_validator.models import Topology

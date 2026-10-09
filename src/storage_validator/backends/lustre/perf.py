@@ -432,6 +432,8 @@ def run_perf_checks(
     pool_thresholds: dict[str, PerfThresholds] | None = None,
     elbencho_path: str = "elbencho",
     threads: int | None = None,
+    ost_names: set[str] | None = None,
+    pool_names: set[str] | None = None,
     on_result: Callable[[tuple[PerfResult, PerfResult, PerfResult, PerfResult]], None] | None = None,
 ) -> list[PerfResult]:
     """Run one write+read throughput/latency check against every OST in the
@@ -445,6 +447,14 @@ def run_perf_checks(
     Each pool's own thresholds are used so different drive types (e.g. ssd
     vs hdd pools) aren't judged against the same bar.
 
+    `ost_names`, if given, restricts per-OST checks to only the named OSTs
+    (matched against `Target.name`). `pool_names`, if given, restricts
+    per-pool checks to only the named pools. The two filters are
+    independent -- e.g. passing only `ost_names` still runs per-pool checks
+    for every pool (using all of that pool's OSTs, not just the named
+    ones), and passing only `pool_names` still runs per-OST checks for
+    every OST.
+
     If `on_result` is given, it's called with each check's 4-tuple of
     results (write throughput/latency, read throughput/latency) as soon as
     that check finishes, so a caller can stream results instead of waiting
@@ -453,8 +463,10 @@ def run_perf_checks(
     default_thresholds = default_thresholds or PerfThresholds()
     threads = threads or detect_cpu_thread_count()
     results: list[PerfResult] = []
-    groups: dict[str, list[Target]] = defaultdict(list)
-    for target in topology.osts:
+    ost_targets = topology.osts
+    if ost_names:
+        ost_targets = [t for t in ost_targets if t.name in ost_names]
+    for target in ost_targets:
         th = resolve_thresholds(target, default_thresholds, pool_thresholds)
         quad = ost_rw_check(
             target, mount_path, size, block_size, runtime, timeout,
@@ -467,10 +479,15 @@ def run_perf_checks(
             results.append(result)
         if on_result:
             on_result(quad)
+
+    groups: dict[str, list[Target]] = defaultdict(list)
+    for target in topology.osts:
         pool_label = target.pool or "(unpooled)"
         groups[pool_label].append(target)
 
     for pool_label, group_targets in groups.items():
+        if pool_names and pool_label not in pool_names:
+            continue
         th = (pool_thresholds or {}).get(pool_label, default_thresholds)
         quad = pool_rw_check(
             pool_label, group_targets, mount_path, size, block_size, runtime, timeout,

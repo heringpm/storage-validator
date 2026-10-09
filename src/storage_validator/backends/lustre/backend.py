@@ -55,5 +55,7 @@ class LustreBackend(StorageBackend):
             pool_thresholds=cfg.pool_thresholds,
             elbencho_path=cfg.elbencho_path,
             threads=cfg.perf_threads,
+            ost_names=cfg.ost_names,
+            pool_names=cfg.pool_names,
             on_result=on_result,
         )
