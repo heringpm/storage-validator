@@ -75,7 +75,11 @@ files, each pass deriving both its throughput ("MiB/s [last]") and its
 latency ("IO lat us [max]") from its own output. The write pass populates the
 files; the read pass reuses that data instead of writing it again, cutting
 total runtime roughly in half compared to writing separately for each
-direction. Scratch files are only removed once both passes have finished. By
+direction. The write pass uses elbencho's `--sync` flag so each file is
+fsynced to the OST backend before the pass exits, ensuring the write is
+actually durable before the read pass starts — otherwise the two phases'
+backend I/O can visibly overlap even though they run strictly sequentially
+on the client. Scratch files are only removed once both passes have finished. By
 default each elbencho invocation uses the host's total CPU thread count
 (parsed from `lscpu`) as its worker thread/file count. This total is never
 multiplied by the number of OSTs in a pool — a per-pool run still uses

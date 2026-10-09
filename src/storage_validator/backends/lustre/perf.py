@@ -105,10 +105,17 @@ def _run_elbencho_rw(
     `threads` worker threads (regardless of how many paths are given), and
     return `(throughput_mibs, latency_us)` parsed from its CSV output.
 
+    The write pass adds `--sync`, so elbencho fsyncs each file before
+    exiting. Without this, `write()` under `--direct` can return (and our
+    subprocess call can complete) before the data is actually durable on the
+    OST backend, letting the immediately-following read pass's I/O overlap
+    with the write's still-settling backend I/O.
+
     Raises `ElbenchoError` if the command fails or its output can't be
     parsed, `shell.CommandError` if the command itself couldn't be run.
     """
     io_flag = "-w" if mode == "write" else "-r"
+    extra_flags = ["--sync"] if mode == "write" else []
     csv_fd, csv_path = tempfile.mkstemp(prefix="storage_validator_elbencho_", suffix=".csv")
     os.close(csv_fd)
     os.remove(csv_path)
@@ -118,7 +125,7 @@ def _run_elbencho_rw(
                 elbencho_path, io_flag, "-t", str(threads), "-b", block_size,
                 "-s", size, "--direct", "--timelimit", str(runtime),
                 "--csvfile", csv_path,
-            ] + paths,
+            ] + extra_flags + paths,
             timeout=timeout,
         )
         if not result.ok:
