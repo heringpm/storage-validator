@@ -154,13 +154,13 @@ def _ensure_striped_dir(path: str, stripe_args: list[str], timeout: float) -> st
     return None
 
 
-_DAEMON_LOG_PATH = "/tmp/storage_validator_elbencho_daemon.log"
+_DAEMON_LOG_PATH = "/tmp/storage_validator_elbencho_service.log"
 
 
 def start_elbencho_daemons(
     hosts: list[str], elbencho_path: str = "elbencho", timeout: float = 30
 ) -> list[str]:
-    """SSH to each of `hosts` and start a detached `elbencho --daemon`
+    """SSH to each of `hosts` and start a detached `elbencho --service`
     process (logging to `_DAEMON_LOG_PATH` on that host), so a later
     `elbencho --hosts h1,h2,...` invocation can coordinate a distributed
     benchmark across all of them.
@@ -172,7 +172,7 @@ def start_elbencho_daemons(
     failed = []
     for host in hosts:
         remote_cmd = (
-            f"nohup {elbencho_path} --daemon > {_DAEMON_LOG_PATH} 2>&1 < /dev/null &"
+            f"nohup {elbencho_path} --service > {_DAEMON_LOG_PATH} 2>&1 < /dev/null &"
         )
         cmd = ["ssh", "-f", host, remote_cmd]
         if shell.DRY_RUN:
@@ -191,14 +191,14 @@ def start_elbencho_daemons(
 def stop_elbencho_daemons(
     hosts: list[str], timeout: float = 30
 ) -> None:
-    """SSH to each of `hosts` and kill its `elbencho --daemon` process.
+    """SSH to each of `hosts` and kill its `elbencho --service` process.
 
-    Best-effort: a host with no running daemon (or an unreachable host)
+    Best-effort: a host with no running service (or an unreachable host)
     doesn't raise -- this is cleanup, not a check that must pass. No-op in
     dry-run mode other than printing the commands.
     """
     for host in hosts:
-        cmd = ["ssh", host, "pkill", "-f", "elbencho --daemon"]
+        cmd = ["ssh", host, "pkill", "-f", "elbencho --service"]
         if shell.DRY_RUN:
             shell.print_dry_run(cmd)
             continue
@@ -272,10 +272,10 @@ def _run_elbencho_rw(
     to list out one explicit file path per thread on the command line.
 
     If `hosts` is given, elbencho is run in distributed mode (`--hosts
-    h1,h2,...`), coordinating an `elbencho --daemon` already running on each
-    host (see `start_elbencho_daemons`) so the combined throughput of every
-    host hitting the filesystem at once is measured, instead of just one
-    client's local thread count.
+    h1,h2,...`), coordinating an `elbencho --service` instance already
+    running on each host (see `start_elbencho_daemons`) so the combined
+    throughput of every host hitting the filesystem at once is measured,
+    instead of just one client's local thread count.
 
     The write pass adds `--sync`, so elbencho fsyncs each file before
     exiting. Without this, `write()` under `--direct` can return (and our
@@ -610,8 +610,8 @@ def run_perf_checks(
     of that pool's OSTs, not just the named ones.
 
     If `hosts` is given (a list of hostnames/IPs reachable via passwordless
-    SSH), an `elbencho --daemon` is started on each host before any checks
-    run (and stopped again afterwards, even if a check fails), and every
+    SSH), an `elbencho --service` instance is started on each host before
+    any checks run (and stopped again afterwards, even if a check fails), and every
     `elbencho` invocation runs in distributed mode across all of them at
     once (`--hosts h1,h2,...`) -- so each check measures combined
     throughput from every host hitting the filesystem simultaneously,

@@ -69,7 +69,7 @@ class PerfConfig:
     pool_names: Optional[set[str]] = None
     # Extra hosts (reachable via passwordless SSH) to run elbencho on in
     # distributed mode alongside the local client, for maxing out
-    # throughput beyond what one client can push. An `elbencho --daemon` is
+    # throughput beyond what one client can push. An `elbencho --service` is
     # started on each host before testing and stopped afterwards. Populated
     # from `--hosts` (comma-separated) and/or `--hosts-file` (one host per
     # line) on the CLI.
