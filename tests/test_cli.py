@@ -48,7 +48,16 @@ def test_cli_writes_json_report(tmp_path):
 
 def test_cli_prints_console_output_by_default():
     runner = CliRunner()
-    with patch("storage_validator.cli.engine.run", return_value=make_report()):
+    report = make_report()
+
+    def fake_run(cfg, on_topology=None, on_health=None, on_perf_result=None):
+        if on_topology:
+            on_topology(report.topology)
+        if on_health:
+            on_health(report.health)
+        return report
+
+    with patch("storage_validator.cli.engine.run", side_effect=fake_run):
         result = runner.invoke(main, ["--skip-perf"])
     assert "scratch" in result.output
 

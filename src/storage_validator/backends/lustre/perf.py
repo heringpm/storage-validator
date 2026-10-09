@@ -29,7 +29,7 @@ import os
 import re
 import tempfile
 from collections import defaultdict
-from typing import Literal
+from typing import Callable, Literal
 
 from storage_validator.config import PerfThresholds
 from storage_validator.models import PerfResult, Target, Topology
@@ -405,6 +405,7 @@ def run_perf_checks(
     pool_thresholds: dict[str, PerfThresholds] | None = None,
     elbencho_path: str = "elbencho",
     threads: int | None = None,
+    on_result: Callable[[tuple[PerfResult, PerfResult, PerfResult, PerfResult]], None] | None = None,
 ) -> list[PerfResult]:
     """Run one write+read throughput/latency check against every OST in the
     topology, then one write+read aggregate throughput/latency test per OST
@@ -416,6 +417,11 @@ def run_perf_checks(
     via `lscpu`, or the `threads` override) regardless of topology size.
     Each pool's own thresholds are used so different drive types (e.g. ssd
     vs hdd pools) aren't judged against the same bar.
+
+    If `on_result` is given, it's called with each check's 4-tuple of
+    results (write throughput/latency, read throughput/latency) as soon as
+    that check finishes, so a caller can stream results instead of waiting
+    for every OST/pool to be checked before seeing anything.
     """
     default_thresholds = default_thresholds or PerfThresholds()
     threads = threads or detect_cpu_thread_count()
@@ -432,6 +438,8 @@ def run_perf_checks(
         for result in quad:
             result.pool = target.pool
             results.append(result)
+        if on_result:
+            on_result(quad)
         pool_label = target.pool or "(unpooled)"
         groups[pool_label].append(target)
 
@@ -444,4 +452,6 @@ def run_perf_checks(
             elbencho_path=elbencho_path, threads=threads,
         )
         results.extend(quad)
+        if on_result:
+            on_result(quad)
     return results

@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 
 import click
+from rich.console import Console
+from rich.live import Live
 
 from storage_validator import engine
 from storage_validator.config import Config, HealthConfig, PerfConfig, PerfThresholds
@@ -121,10 +123,39 @@ def main(
         ),
     )
 
-    report = engine.run(cfg)
+    if quiet:
+        report = engine.run(cfg)
+    else:
+        console = Console()
+        perf_table = None
+        live: Live | None = None
 
-    if not quiet:
-        console_report.render_report(report)
+        def on_topology(topology) -> None:
+            console.print(console_report.build_topology_table(topology))
+
+        def on_health(health_results) -> None:
+            console.print(console_report.build_health_table(health_results))
+
+        def on_perf_result(quad) -> None:
+            nonlocal perf_table, live
+            if perf_table is None:
+                perf_table = console_report.build_perf_table([])
+                live = Live(perf_table, console=console, refresh_per_second=4)
+                live.start()
+            for result in quad:
+                console_report.add_perf_row(perf_table, result)
+            live.refresh()
+
+        report = engine.run(
+            cfg,
+            on_topology=on_topology,
+            on_health=on_health,
+            on_perf_result=None if cfg.skip_perf else on_perf_result,
+        )
+        if live is not None:
+            live.stop()
+        overall = report.overall_status()
+        console.print(f"Overall status: {console_report.styled_overall_status(overall)}")
 
     if json_path:
         json_report.write_report(report, json_path)

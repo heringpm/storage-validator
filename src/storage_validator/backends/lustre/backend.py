@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from storage_validator.backends.base import StorageBackend, register_backend
 from storage_validator.config import HealthConfig, PerfConfig
 from storage_validator.models import CheckResult, PerfResult, Topology
@@ -24,7 +26,12 @@ class LustreBackend(StorageBackend):
             fail_pct=self.health_cfg.fail_pct,
         )
 
-    def run_perf_checks(self, topology: Topology, cfg: PerfConfig) -> list[PerfResult]:
+    def run_perf_checks(
+        self,
+        topology: Topology,
+        cfg: PerfConfig,
+        on_result: Callable[[list[PerfResult]], None] | None = None,
+    ) -> list[PerfResult]:
         mount_path = cfg.mount_path or (topology.mounts[0] if topology.mounts else None)
         if mount_path is None:
             return [
@@ -48,4 +55,5 @@ class LustreBackend(StorageBackend):
             pool_thresholds=cfg.pool_thresholds,
             elbencho_path=cfg.elbencho_path,
             threads=cfg.perf_threads,
+            on_result=on_result,
         )

@@ -8,7 +8,7 @@ depends on a specific filesystem implementation.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from storage_validator.config import PerfConfig
@@ -32,9 +32,17 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def run_perf_checks(
-        self, topology: "Topology", cfg: "PerfConfig"
+        self,
+        topology: "Topology",
+        cfg: "PerfConfig",
+        on_result: "Callable[[list[PerfResult]], None] | None" = None,
     ) -> list["PerfResult"]:
-        """Run basic throughput/latency perf checks."""
+        """Run basic throughput/latency perf checks.
+
+        If `on_result` is given, it's called with each check's results as
+        soon as that check completes, so callers can stream results instead
+        of waiting for the full run to finish.
+        """
         raise NotImplementedError
 
 
