@@ -314,8 +314,15 @@ def _run_elbencho_rw(
         except OSError:
             pass
         return 0.0, 0.0
+    # `timeout` is the generic subprocess timeout used for quick lfs/lctl
+    # calls elsewhere; it's unrelated to elbencho's own `--timelimit
+    # runtime`. elbencho needs at least `runtime` seconds to run its test
+    # plus startup/teardown overhead (connecting to remote `--hosts`
+    # services, writing/reading `size` of data, etc.), which easily exceeds
+    # a short generic timeout -- so always give it at least `runtime + 60`.
+    elbencho_timeout = max(timeout, runtime + 60)
     try:
-        result = shell.run_cmd(cmd, timeout=timeout)
+        result = shell.run_cmd(cmd, timeout=elbencho_timeout)
         if not result.ok:
             raise ElbenchoError((result.stderr or result.stdout).strip())
 
