@@ -71,7 +71,9 @@ storage-validator \
 Every check (per-OST and per-pool) runs one write pass and one read pass with
 `elbencho`, each deriving both its throughput ("MiB/s [last]") and its latency
 ("IO lat us [max]") from that single pass's output — there's no separate
-latency-only test. By default each elbencho invocation uses the host's total
+latency-only test. The write pass always runs first to populate the scratch
+file(s) (`elbencho` can't read a file with no data), and the scratch file(s)
+are only removed once both passes have finished. By default each elbencho invocation uses the host's total
 CPU thread count (parsed from `lscpu`) as its worker thread count. This total
 is never multiplied by the number of OSTs in a pool — a per-pool run still
 uses exactly that many threads in total, spread across the pool's scratch

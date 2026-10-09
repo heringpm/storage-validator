@@ -138,6 +138,8 @@ def test_ost_rw_check_uses_configured_threads(tmp_path):
 
 
 def test_ost_rw_check_read_uses_dash_r(tmp_path):
+    """A read-mode check must first run a write pass to populate the scratch
+    file (elbencho can't read a file with no data), then a read pass."""
     captured_cmds = []
 
     def fake_run_cmd(args, timeout=30):
@@ -150,9 +152,11 @@ def test_ost_rw_check_read_uses_dash_r(tmp_path):
     ), patch("os.remove"):
         perf.ost_rw_check(OST0, str(tmp_path), "read", threads=1)
 
-    elbencho_cmd = next(c for c in captured_cmds if "elbencho" in c[0])
-    assert "-r" in elbencho_cmd
-    assert "-w" not in elbencho_cmd
+    elbencho_cmds = [c for c in captured_cmds if "elbencho" in c[0]]
+    assert len(elbencho_cmds) == 2
+    assert "-w" in elbencho_cmds[0]
+    assert "-r" in elbencho_cmds[1]
+    assert "-w" not in elbencho_cmds[1]
 
 
 def test_ost_rw_check_defaults_threads_to_detected_cpu_count(tmp_path):
@@ -327,6 +331,34 @@ def test_pool_rw_check_uses_elbencho_max_latency(tmp_path):
 
     assert l_result.value == 100.0  # 100000 us -> 100 ms
     assert l_result.scope == "pool"
+
+
+def test_pool_rw_check_read_runs_write_pass_first(tmp_path):
+    """A read-mode pool check must first run a write pass to populate every
+    OST's scratch file, then a read pass, using the same scratch paths."""
+    captured_cmds = []
+
+    def fake_run_cmd(args, timeout=30):
+        captured_cmds.append(args)
+        return _fake_elbencho_run_cmd()(args, timeout=timeout)
+
+    ost0 = Target(name="scratch-OST0000", kind="ost", pool="flash")
+    ost1 = Target(name="scratch-OST0001", kind="ost", pool="flash")
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"):
+        perf.pool_rw_check("flash", [ost0, ost1], str(tmp_path), "read", threads=1)
+
+    elbencho_cmds = [c for c in captured_cmds if "elbencho" in c[0]]
+    assert len(elbencho_cmds) == 2
+    assert "-w" in elbencho_cmds[0]
+    assert "-r" in elbencho_cmds[1]
+    assert "-w" not in elbencho_cmds[1]
+    # Both passes target the same scratch file paths.
+    write_paths = elbencho_cmds[0][elbencho_cmds[0].index("--csvfile") + 2:]
+    read_paths = elbencho_cmds[1][elbencho_cmds[1].index("--csvfile") + 2:]
+    assert write_paths == read_paths
 
 
 def test_resolve_thresholds_falls_back_to_default():

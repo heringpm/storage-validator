@@ -174,9 +174,13 @@ def ost_rw_check(
     elbencho_path: str = "elbencho",
     threads: int | None = None,
 ) -> tuple[PerfResult, PerfResult]:
-    """Run one direct-I/O `elbencho` read or write pass against `target`'s
-    OST (single-striped onto it), returning `(throughput_result,
-    latency_result)` derived from that single run.
+    """Run one direct-I/O `elbencho` write pass immediately followed by one
+    read pass against `target`'s OST (single-striped onto it), returning
+    `(throughput_result, latency_result)` for the requested `mode`.
+
+    The write pass always runs first to populate the scratch file (`elbencho`
+    can't read a file that doesn't already contain data), and the scratch
+    file is only removed after both passes have completed.
     """
     threads = threads or detect_cpu_thread_count()
     idx = ost_index(target)
@@ -193,9 +197,15 @@ def ost_rw_check(
         if not setstripe.ok:
             return _fail_pair(target.name, mode, f"lfs setstripe failed: {setstripe.stderr.strip()}")
 
-        rate, lat_us = _run_elbencho_rw(
-            [path], mode, threads, size, block_size, runtime, elbencho_path, timeout
+        write_rate, write_lat_us = _run_elbencho_rw(
+            [path], "write", threads, size, block_size, runtime, elbencho_path, timeout
         )
+        if mode == "write":
+            rate, lat_us = write_rate, write_lat_us
+        else:
+            rate, lat_us = _run_elbencho_rw(
+                [path], "read", threads, size, block_size, runtime, elbencho_path, timeout
+            )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_pair(target.name, mode, f"elbencho failed: {exc}")
     finally:
@@ -280,11 +290,15 @@ def pool_rw_check(
     elbencho_path: str = "elbencho",
     threads: int | None = None,
 ) -> tuple[PerfResult, PerfResult]:
-    """Run one direct-I/O `elbencho` read or write pass across every OST in a
-    pool at once (one single-striped scratch file per OST, `threads` worker
-    threads total spread across all of them -- not multiplied by OST count),
-    returning `(throughput_result, latency_result)` derived from that single
-    run's aggregate/worst-case CSV output.
+    """Run one direct-I/O `elbencho` write pass immediately followed by one
+    read pass across every OST in a pool at once (one single-striped scratch
+    file per OST, `threads` worker threads total spread across all of them --
+    not multiplied by OST count), returning `(throughput_result,
+    latency_result)` for the requested `mode`.
+
+    The write pass always runs first to populate the scratch files
+    (`elbencho` can't read a file that doesn't already contain data), and the
+    scratch files are only removed after both passes have completed.
     """
     pool_kwargs = dict(pool=pool_label if pool_label != "(unpooled)" else None, scope="pool")
     indices = _group_ost_indices(targets)
@@ -295,15 +309,21 @@ def pool_rw_check(
 
     threads = threads or detect_cpu_thread_count()
     stripe_count = len(indices)
-    paths = _pool_ost_paths(pool_label, indices, mount_path, mode)
+    paths = _pool_ost_paths(pool_label, indices, mount_path, "rw")
     try:
         err = _setstripe_per_ost(indices, paths, timeout)
         if err:
             return _fail_pair(f"pool:{pool_label}", mode, err, **pool_kwargs)
 
-        rate, lat_us = _run_elbencho_rw(
-            paths, mode, threads, size, block_size, runtime, elbencho_path, timeout
+        write_rate, write_lat_us = _run_elbencho_rw(
+            paths, "write", threads, size, block_size, runtime, elbencho_path, timeout
         )
+        if mode == "write":
+            rate, lat_us = write_rate, write_lat_us
+        else:
+            rate, lat_us = _run_elbencho_rw(
+                paths, "read", threads, size, block_size, runtime, elbencho_path, timeout
+            )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_pair(f"pool:{pool_label}", mode, f"elbencho failed: {exc}", **pool_kwargs)
     finally:
