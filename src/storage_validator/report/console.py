@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from storage_validator.models import CheckResult, PerfResult, Report, Topology
@@ -54,7 +55,7 @@ def build_health_table(results: list[CheckResult]) -> Table:
             result.name,
             result.target or "-",
             _styled_status(result.status),
-            result.message,
+            escape(result.message),
         )
     return table
 
@@ -94,5 +95,5 @@ def add_perf_row(table: Table, result: PerfResult) -> None:
         result.kind,
         f"{result.value:.2f} {result.unit}",
         _styled_status(result.status),
-        result.message,
+        escape(result.message),
     )

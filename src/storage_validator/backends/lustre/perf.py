@@ -81,13 +81,24 @@ def ost_index(target: Target) -> int | None:
     return int(match.group(1), 16)
 
 
-def _read_elbencho_csv_last_row(csv_path: str) -> dict[str, str] | None:
-    """Read the last row elbencho wrote to its `--csvfile` output."""
+def _read_elbencho_csv_last_row(csv_path: str, operation: str) -> dict[str, str] | None:
+    """Read the row elbencho wrote to its `--csvfile` output for `operation`
+    ("WRITE" or "READ").
+
+    When `--sync` is passed (write pass only), elbencho appends a *second*
+    row for the separate SYNC phase after the WRITE row, with all
+    throughput/latency fields blank -- so we can't just take the last row,
+    we have to pick the row whose `operation` column matches the phase we
+    actually care about.
+    """
     try:
         with open(csv_path, newline="") as fh:
             rows = list(csv.DictReader(fh))
     except OSError:
         return None
+    for row in reversed(rows):
+        if row.get("operation") == operation:
+            return row
     return rows[-1] if rows else None
 
 
@@ -131,7 +142,7 @@ def _run_elbencho_rw(
         if not result.ok:
             raise ElbenchoError((result.stderr or result.stdout).strip())
 
-        row = _read_elbencho_csv_last_row(csv_path)
+        row = _read_elbencho_csv_last_row(csv_path, "WRITE" if mode == "write" else "READ")
         if row is None or not row.get("MiB/s [last]") or not row.get("IO lat us [max]"):
             raise ElbenchoError(
                 "could not parse elbencho CSV output (missing --lat?); "

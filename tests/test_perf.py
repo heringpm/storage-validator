@@ -20,6 +20,23 @@ def test_ost_index():
     assert perf.ost_index(BAD_NAME) is None
 
 
+def test_read_elbencho_csv_last_row_skips_sync_row(tmp_path):
+    """`--sync` makes elbencho append a second SYNC-phase row after the
+    WRITE row, with all throughput/latency fields blank -- the parser must
+    pick the WRITE row, not simply the last row in the file.
+    """
+    csv_path = tmp_path / "out.csv"
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["operation", "MiB/s [last]", "IO lat us [max]"])
+        writer.writeheader()
+        writer.writerow({"operation": "WRITE", "MiB/s [last]": "300.0", "IO lat us [max]": "1000.0"})
+        writer.writerow({"operation": "SYNC", "MiB/s [last]": "", "IO lat us [max]": ""})
+
+    row = perf._read_elbencho_csv_last_row(str(csv_path), "WRITE")
+    assert row["MiB/s [last]"] == "300.0"
+    assert row["IO lat us [max]"] == "1000.0"
+
+
 def test_detect_cpu_thread_count_parses_lscpu():
     def fake_run_cmd(args, timeout=30):
         return shell_result(0, "Architecture: x86_64\nCPU(s):  16\nVendor ID: GenuineIntel\n", "")
