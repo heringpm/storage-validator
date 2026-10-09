@@ -474,3 +474,77 @@ def test_resolve_thresholds_falls_back_to_default():
     assert perf.resolve_thresholds(no_pool_target, default, custom) is default
     assert perf.resolve_thresholds(archive_target, default, custom) is default
     assert perf.resolve_thresholds(flash_target, default, custom) is custom["flash"]
+
+
+def test_normalize_hosts_replaces_local_hostname_with_localhost():
+    import socket
+
+    local = socket.gethostname()
+    hosts = perf.normalize_hosts([local, "remotehost", "localhost"])
+    # Both the local hostname and the literal "localhost" collapse to one
+    # "localhost" entry, deduplicated, with the remote host left untouched.
+    assert hosts == ["localhost", "remotehost"]
+
+
+def test_normalize_hosts_leaves_remote_only_list_untouched():
+    hosts = perf.normalize_hosts(["remote1", "remote2"])
+    assert hosts == ["remote1", "remote2"]
+
+
+def test_start_elbencho_daemons_starts_localhost_entry_locally(tmp_path):
+    """A "localhost" entry must be started as a local background process,
+    not over SSH."""
+    captured_ssh = []
+    captured_popen = []
+
+    def fake_run_cmd(args, timeout=30):
+        captured_ssh.append(args)
+        return shell_result(0, "", "")
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured_popen.append(cmd)
+
+    log_path = str(tmp_path / "log")
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("storage_validator.backends.lustre.perf.subprocess.Popen", FakePopen), patch(
+        "storage_validator.backends.lustre.perf._DAEMON_LOG_PATH", log_path
+    ):
+        failed = perf.start_elbencho_daemons(["localhost", "remotehost"])
+
+    assert failed == []
+    assert len(captured_popen) == 1
+    assert captured_popen[0][0] == "elbencho"
+    assert captured_popen[0][1] == "--service"
+    # Only the remote host goes over SSH.
+    assert len(captured_ssh) == 1
+    assert captured_ssh[0][:2] == ["ssh", "-f"]
+    assert "remotehost" in captured_ssh[0]
+
+
+def test_stop_elbencho_daemons_kills_localhost_entry_locally():
+    captured_ssh = []
+    captured_local = []
+
+    def fake_run_cmd(args, timeout=30):
+        captured_ssh.append(args)
+        return shell_result(0, "", "")
+
+    def fake_subprocess_run(args, timeout=30, check=False):
+        captured_local.append(args)
+        return shell_result(0, "", "")
+
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch(
+        "storage_validator.backends.lustre.perf.subprocess.run",
+        side_effect=fake_subprocess_run,
+    ):
+        perf.stop_elbencho_daemons(["localhost", "remotehost"])
+
+    assert captured_local == [["pkill", "-f", "elbencho --service"]]
+    assert len(captured_ssh) == 1
+    assert captured_ssh[0][0] == "ssh" and "remotehost" in captured_ssh[0]

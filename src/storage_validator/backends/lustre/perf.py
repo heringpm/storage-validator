@@ -43,6 +43,8 @@ import csv
 import logging
 import os
 import re
+import socket
+import subprocess
 import tempfile
 from collections import defaultdict
 from typing import Callable, Literal
@@ -156,21 +158,72 @@ def _ensure_striped_dir(path: str, stripe_args: list[str], timeout: float) -> st
 
 _DAEMON_LOG_PATH = "/tmp/storage_validator_elbencho_service.log"
 
+_LOCAL_SERVICE_MARKER = "localhost"
+
+
+def _is_local_host(host: str) -> bool:
+    """True if `host` refers to this machine -- `localhost`/loopback, the
+    short or fully-qualified local hostname.
+    """
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    try:
+        local_names = {socket.gethostname(), socket.gethostname().split(".")[0], socket.getfqdn()}
+    except OSError:
+        return False
+    return host in local_names
+
+
+def normalize_hosts(hosts: list[str]) -> list[str]:
+    """Replace any entry in `hosts` that refers to this machine (its own
+    hostname, FQDN, etc.) with the literal `"localhost"`, deduplicating the
+    result.
+
+    This lets a user list their own client's hostname in `--hosts` (e.g.
+    alongside other real remote hosts) and have `start_elbencho_daemons`
+    recognize it as "start the elbencho service locally" rather than
+    SSHing to itself, so the local client still participates in the
+    distributed benchmark instead of being silently dropped.
+    """
+    return list(dict.fromkeys(_LOCAL_SERVICE_MARKER if _is_local_host(h) else h for h in hosts))
+
 
 def start_elbencho_daemons(
     hosts: list[str], elbencho_path: str = "elbencho", timeout: float = 30
 ) -> list[str]:
-    """SSH to each of `hosts` and start a detached `elbencho --service`
-    process (logging to `_DAEMON_LOG_PATH` on that host), so a later
-    `elbencho --hosts h1,h2,...` invocation can coordinate a distributed
-    benchmark across all of them.
+    """Start a detached `elbencho --service` process on each of `hosts`
+    (logging to `_DAEMON_LOG_PATH`), so a later `elbencho --hosts
+    h1,h2,...` invocation can coordinate a distributed benchmark across all
+    of them.
+
+    `hosts` entries equal to `"localhost"` (see `normalize_hosts`) are
+    started directly as a local background process instead of over SSH, so
+    the local client can participate alongside remote hosts.
 
     Returns the list of hosts that failed to start (empty if all succeeded).
-    In dry-run mode, prints the `ssh` commands instead of running them and
+    In dry-run mode, prints the commands instead of running them and
     returns an empty list.
     """
     failed = []
     for host in hosts:
+        if host == _LOCAL_SERVICE_MARKER:
+            cmd = [elbencho_path, "--service"]
+            if shell.DRY_RUN:
+                shell.print_dry_run(cmd)
+                continue
+            try:
+                with open(_DAEMON_LOG_PATH, "ab") as log_file:
+                    subprocess.Popen(
+                        cmd,
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+            except OSError:
+                failed.append(host)
+            continue
+
         remote_cmd = (
             f"nohup {elbencho_path} --service > {_DAEMON_LOG_PATH} 2>&1 < /dev/null &"
         )
@@ -191,13 +244,27 @@ def start_elbencho_daemons(
 def stop_elbencho_daemons(
     hosts: list[str], timeout: float = 30
 ) -> None:
-    """SSH to each of `hosts` and kill its `elbencho --service` process.
+    """Kill the `elbencho --service` process on each of `hosts`.
+
+    `hosts` entries equal to `"localhost"` (see `normalize_hosts`) are
+    killed locally instead of over SSH.
 
     Best-effort: a host with no running service (or an unreachable host)
     doesn't raise -- this is cleanup, not a check that must pass. No-op in
     dry-run mode other than printing the commands.
     """
     for host in hosts:
+        if host == _LOCAL_SERVICE_MARKER:
+            cmd = ["pkill", "-f", "elbencho --service"]
+            if shell.DRY_RUN:
+                shell.print_dry_run(cmd)
+                continue
+            try:
+                subprocess.run(cmd, timeout=timeout, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            continue
+
         cmd = ["ssh", host, "pkill", "-f", "elbencho --service"]
         if shell.DRY_RUN:
             shell.print_dry_run(cmd)
@@ -673,7 +740,13 @@ def run_perf_checks(
     `elbencho` invocation runs in distributed mode across all of them at
     once (`--hosts h1,h2,...`) -- so each check measures combined
     throughput from every host hitting the filesystem simultaneously,
-    instead of just the local client.
+    instead of just the local client. elbencho applies `threads` *per*
+    listed host, so throughput scales with the number of hosts (e.g.
+    `threads=24` with 2 hosts runs 48 threads total). If an entry in
+    `hosts` is this local machine's own hostname (see `normalize_hosts`),
+    the elbencho service for it is started locally instead of over SSH, so
+    the local client keeps participating instead of being replaced by the
+    remote hosts.
 
     If `oss_hosts` is given (a list of OSS/server hostnames reachable via
     passwordless SSH), their page cache is dropped between each check's
@@ -690,6 +763,7 @@ def run_perf_checks(
     results: list[PerfResult] = []
 
     if hosts:
+        hosts = normalize_hosts(hosts)
         failed_hosts = start_elbencho_daemons(hosts, elbencho_path, timeout)
         if failed_hosts:
             log.warning(
