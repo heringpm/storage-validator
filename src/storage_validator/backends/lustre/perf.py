@@ -122,19 +122,21 @@ def _run_elbencho_rw(
     OST backend, letting the immediately-following read pass's I/O overlap
     with the write's still-settling backend I/O.
 
-    The write pass also adds `--trunc`, so each file is truncated to exactly
-    `size` before writing. Without this, a leftover scratch file from a
-    prior run that didn't finish writing a full-size file (e.g. it hit
-    `--timelimit` partway through, or errored out) would still be sitting at
-    its old, smaller size; elbencho refuses to write at an offset beyond a
-    pre-existing file's current size under `--direct`, so the next run would
-    fail with "Given offset plus size to use is larger than detected size."
+    The write pass also adds `--trunctosize`, so each file is truncated (or
+    extended) to exactly `size` via `ftruncate()` before writing. Without
+    this, a leftover scratch file from a prior run that didn't finish
+    writing a full-size file (e.g. it hit `--timelimit` partway through, or
+    errored out) would still be sitting at its old, smaller size; elbencho
+    refuses to write at an offset beyond a pre-existing file's current size
+    under `--direct`, so the next run would fail with "Given offset plus
+    size to use is larger than detected size." (Note: `--trunc` alone
+    truncates to *0*, not to `size`, so it doesn't fix this.)
 
     Raises `ElbenchoError` if the command fails or its output can't be
     parsed, `shell.CommandError` if the command itself couldn't be run.
     """
     io_flag = "-w" if mode == "write" else "-r"
-    extra_flags = ["--sync", "--trunc"] if mode == "write" else []
+    extra_flags = ["--sync", "--trunctosize"] if mode == "write" else []
     csv_fd, csv_path = tempfile.mkstemp(prefix="storage_validator_elbencho_", suffix=".csv")
     os.close(csv_fd)
     os.remove(csv_path)
