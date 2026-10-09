@@ -448,12 +448,12 @@ def run_perf_checks(
     vs hdd pools) aren't judged against the same bar.
 
     `ost_names`, if given, restricts per-OST checks to only the named OSTs
-    (matched against `Target.name`). `pool_names`, if given, restricts
-    per-pool checks to only the named pools. The two filters are
-    independent -- e.g. passing only `ost_names` still runs per-pool checks
-    for every pool (using all of that pool's OSTs, not just the named
-    ones), and passing only `pool_names` still runs per-OST checks for
-    every OST.
+    (matched against `Target.name`). `pool_names`, if given, restricts both
+    per-pool checks to only the named pools *and* per-OST checks to only
+    OSTs belonging to one of those pools (so `--pool flash` tests just the
+    OSTs in the "flash" pool, not every OST in the filesystem). Passing
+    only `ost_names` still runs per-pool checks for every pool, using all
+    of that pool's OSTs, not just the named ones.
 
     If `on_result` is given, it's called with each check's 4-tuple of
     results (write throughput/latency, read throughput/latency) as soon as
@@ -466,6 +466,8 @@ def run_perf_checks(
     ost_targets = topology.osts
     if ost_names:
         ost_targets = [t for t in ost_targets if t.name in ost_names]
+    if pool_names:
+        ost_targets = [t for t in ost_targets if (t.pool or "(unpooled)") in pool_names]
     for target in ost_targets:
         th = resolve_thresholds(target, default_thresholds, pool_thresholds)
         quad = ost_rw_check(

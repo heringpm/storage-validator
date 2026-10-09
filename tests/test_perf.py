@@ -242,7 +242,7 @@ def test_run_perf_checks_ost_names_filters_per_ost_checks_only(tmp_path):
     assert {r.target for r in pool_results} == {"pool:flash"}
 
 
-def test_run_perf_checks_pool_names_filters_per_pool_checks_only(tmp_path):
+def test_run_perf_checks_pool_names_filters_per_ost_and_per_pool_checks(tmp_path):
     from storage_validator.models import Topology
 
     flash = Target(name="scratch-OST0000", kind="ost", pool="flash")
@@ -257,8 +257,8 @@ def test_run_perf_checks_pool_names_filters_per_pool_checks_only(tmp_path):
         )
     ost_results = [r for r in results if r.scope == "ost"]
     pool_results = [r for r in results if r.scope == "pool"]
-    # Per-OST checks are unaffected by pool_names: both OSTs still checked.
-    assert {r.target for r in ost_results} == {"scratch-OST0000", "scratch-OST0001"}
+    # pool_names restricts per-OST checks to only OSTs in that pool too.
+    assert {r.target for r in ost_results} == {"scratch-OST0000"}
     assert {r.target for r in pool_results} == {"pool:flash"}
 
 

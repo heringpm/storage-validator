@@ -54,7 +54,7 @@ def test_overall_status_reflects_worst_result():
     assert report.overall_status() == "FAIL"
 
 
-def test_build_perf_table_combines_throughput_and_latency_into_one_row():
+def test_build_perf_table_combines_write_and_read_into_one_row_per_target():
     results = [
         PerfResult(target="scratch-OST0000", kind="throughput", value=300.0, unit="MB/s", status="PASS", io_mode="write"),
         PerfResult(target="scratch-OST0000", kind="latency", value=1.0, unit="ms", status="PASS", io_mode="write"),
@@ -64,17 +64,16 @@ def test_build_perf_table_combines_throughput_and_latency_into_one_row():
     console = Console(record=True, width=160)
     console.print(console_report.build_perf_table(results))
     text = console.export_text()
-    # One row per io_mode (write, read), not one row per kind -- so the
-    # OST name should appear exactly twice, each row showing both the
-    # throughput and latency value together.
-    assert text.count("scratch-OST0000") == 2
+    # One row per target -- write and read throughput/latency all appear
+    # together on the same line, so the OST name should appear exactly once.
+    assert text.count("scratch-OST0000") == 1
     assert "300.00 MB/s" in text
     assert "1.00 ms" in text
     assert "250.00 MB/s" in text
     assert "2.00 ms" in text
 
 
-def test_add_perf_quad_rows_appends_write_and_read_rows():
+def test_add_perf_quad_rows_appends_single_row_per_target():
     from rich.table import Table
 
     from storage_validator.report.console import _add_perf_columns
@@ -88,4 +87,4 @@ def test_add_perf_quad_rows_appends_write_and_read_rows():
     table = Table()
     _add_perf_columns(table)
     console_report.add_perf_quad_rows(table, quad)
-    assert table.row_count == 2
+    assert table.row_count == 1

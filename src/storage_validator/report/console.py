@@ -62,55 +62,75 @@ def build_health_table(results: list[CheckResult]) -> Table:
 
 def _add_perf_columns(table: Table) -> None:
     table.add_column("Target")
-    table.add_column("I/O")
-    table.add_column("Throughput")
-    table.add_column("Tput Status")
-    table.add_column("Latency")
-    table.add_column("Lat Status")
+    table.add_column("Write Throughput")
+    table.add_column("Write Latency")
+    table.add_column("Read Throughput")
+    table.add_column("Read Latency")
     table.add_column("Message")
 
 
-def _add_perf_row(table: Table, throughput: PerfResult | None, latency: PerfResult | None) -> None:
-    """Append one combined row for a throughput+latency pair (same target
-    and io_mode), with throughput and latency each in their own columns.
-    Either `throughput` or `latency` may be None if a pair couldn't be
+def _value_cell(result: PerfResult | None) -> str:
+    """One value+status cell, e.g. "[green]300.00 MB/s[/green]". Status is
+    conveyed by color instead of a separate column, to keep one row per
+    target (write+read together) from getting too wide.
+    """
+    if result is None:
+        return "-"
+    style = _STATUS_STYLE.get(result.status, "white")
+    return f"[{style}]{result.value:.2f} {result.unit}[/{style}]"
+
+
+def _add_perf_row(
+    table: Table,
+    write_tp: PerfResult | None,
+    write_lat: PerfResult | None,
+    read_tp: PerfResult | None,
+    read_lat: PerfResult | None,
+) -> None:
+    """Append one row per target with write and read throughput/latency
+    each in their own column, so a single OST's/pool's full result fits on
+    one line. Any of the four results may be None if it couldn't be
     matched, in which case that column shows "-".
     """
-    anchor = throughput or latency
+    anchor = write_tp or write_lat or read_tp or read_lat
+    messages = [
+        f"{r.io_mode} {r.kind}: {escape(r.message)}"
+        for r in (write_tp, write_lat, read_tp, read_lat)
+        if r and r.status != "PASS" and r.message
+    ]
     table.add_row(
         anchor.target,
-        anchor.io_mode,
-        f"{throughput.value:.2f} {throughput.unit}" if throughput else "-",
-        _styled_status(throughput.status) if throughput else "-",
-        f"{latency.value:.2f} {latency.unit}" if latency else "-",
-        _styled_status(latency.status) if latency else "-",
-        " / ".join(
-            escape(r.message) for r in (throughput, latency) if r and r.message
-        ),
+        _value_cell(write_tp),
+        _value_cell(write_lat),
+        _value_cell(read_tp),
+        _value_cell(read_lat),
+        " / ".join(messages) if messages else "-",
     )
 
 
 def build_perf_table(results: list[PerfResult]) -> Table:
-    """Build a perf table with one row per (target, io_mode) pair, showing
-    throughput and latency side by side in separate columns instead of as
+    """Build a perf table with one row per target, showing write and read
+    throughput/latency side by side in separate columns instead of as
     separate rows.
     """
     table = Table(title="Performance Checks")
     _add_perf_columns(table)
-    pending: dict[tuple, PerfResult] = {}
+    order: list[str] = []
+    by_target: dict[str, dict[str, dict[str, PerfResult]]] = {}
     for result in results:
-        key = (result.target, result.io_mode)
-        other = pending.pop(key, None)
-        if other is None:
-            pending[key] = result
-            continue
-        tp, lat = (result, other) if result.kind == "throughput" else (other, result)
-        _add_perf_row(table, tp, lat)
-    for result in pending.values():
-        if result.kind == "throughput":
-            _add_perf_row(table, result, None)
-        else:
-            _add_perf_row(table, None, result)
+        if result.target not in by_target:
+            by_target[result.target] = {"write": {}, "read": {}}
+            order.append(result.target)
+        by_target[result.target][result.io_mode][result.kind] = result
+    for target in order:
+        modes = by_target[target]
+        _add_perf_row(
+            table,
+            modes["write"].get("throughput"),
+            modes["write"].get("latency"),
+            modes["read"].get("throughput"),
+            modes["read"].get("latency"),
+        )
     return table
 
 
@@ -129,12 +149,11 @@ def add_perf_quad_rows(
     table: Table,
     quad: tuple[PerfResult, PerfResult, PerfResult, PerfResult],
 ) -> None:
-    """Append two rows (one for write, one for read) to a perf table built
-    with `build_perf_table`/`_add_perf_columns`, from a single check's
+    """Append one row to a perf table built with
+    `build_perf_table`/`_add_perf_columns`, from a single check's
     `(write_throughput, write_latency, read_throughput, read_latency)`
     result tuple. Used to stream rows in as checks finish instead of only
     rendering the full table once every check is done.
     """
     write_tp, write_lat, read_tp, read_lat = quad
-    _add_perf_row(table, write_tp, write_lat)
-    _add_perf_row(table, read_tp, read_lat)
+    _add_perf_row(table, write_tp, write_lat, read_tp, read_lat)

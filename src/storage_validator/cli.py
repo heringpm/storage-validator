@@ -91,7 +91,7 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
     "pool_names",
     multiple=True,
     metavar="NAME",
-    help="Restrict per-pool perf checks to this OST pool name. Repeatable. Per-OST checks are unaffected.",
+    help="Restrict perf checks (both per-OST and per-pool) to this OST pool name. Repeatable.",
 )
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress the console table output.")
