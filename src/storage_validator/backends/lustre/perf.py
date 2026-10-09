@@ -208,6 +208,38 @@ def stop_elbencho_daemons(
             pass
 
 
+def drop_oss_caches(hosts: list[str], timeout: float = 30) -> None:
+    """SSH to each of `hosts` (OSS/server nodes) and drop their page cache,
+    so a read pass that immediately follows a write pass measures real disk
+    I/O instead of being served back out of server-side RAM.
+
+    `--direct` on the client only bypasses the *client's* page cache --
+    it has no effect on caching that happens on the OSS itself (Linux page
+    cache for ldiskfs-backed OSTs, or the ZFS ARC for ZFS-backed OSTs), so
+    without this, a read pass right after a write pass can report
+    multi-GB/s "throughput" that never actually touched the underlying
+    disks.
+
+    Runs `sync; echo 3 > /proc/sys/vm/drop_caches` on each host, which drops
+    the Linux page cache/dentries/inodes (covering ldiskfs-backed OSTs, and
+    partially reclaiming the ZFS ARC via its kernel memory shrinker, though
+    ZFS makes no guarantee of a full ARC flush this way).
+
+    Best-effort: a host that fails or is unreachable doesn't raise -- this
+    is a best-effort cache drop, not a check that must pass. No-op in
+    dry-run mode other than printing the commands.
+    """
+    for host in hosts:
+        cmd = ["ssh", host, "sync; echo 3 > /proc/sys/vm/drop_caches"]
+        if shell.DRY_RUN:
+            shell.print_dry_run(cmd)
+            continue
+        try:
+            shell.run_cmd(cmd, timeout=timeout)
+        except shell.CommandError:
+            pass
+
+
 def _clear_scratch_dir(path: str) -> None:
     """Remove every regular file directly inside `path` (the scratch files
     elbencho created, one per worker thread), leaving the directory itself
@@ -380,6 +412,7 @@ def _write_then_read(
     elbencho_path: str,
     timeout: float,
     hosts: list[str] | None = None,
+    oss_hosts: list[str] | None = None,
 ) -> tuple[float, float, float, float]:
     """Run one write pass against `directory` (one file per worker thread,
     created by elbencho itself), then read that same data back, returning
@@ -388,10 +421,17 @@ def _write_then_read(
     The write pass's data is reused for the read pass instead of writing it
     twice. If `hosts` is given, both passes run across every host at once
     (see `_run_elbencho_rw`).
+
+    If `oss_hosts` is given, their page cache is dropped (see
+    `drop_oss_caches`) between the write and read passes, so the read pass
+    measures real disk I/O instead of data served back out of OSS-side RAM
+    (which `--direct` on the client has no effect on).
     """
     write_rate, write_lat_us = _run_elbencho_rw(
         directory, "write", threads, size, block_size, runtime, elbencho_path, timeout, hosts
     )
+    if oss_hosts:
+        drop_oss_caches(oss_hosts, timeout)
     read_rate, read_lat_us = _run_elbencho_rw(
         directory, "read", threads, size, block_size, runtime, elbencho_path, timeout, hosts
     )
@@ -433,6 +473,7 @@ def ost_rw_check(
     elbencho_path: str = "elbencho",
     threads: int | None = None,
     hosts: list[str] | None = None,
+    oss_hosts: list[str] | None = None,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
     read pass against `target`'s OST, returning
@@ -452,6 +493,10 @@ def ost_rw_check(
     the same shared `ost_dir` at once (see `_run_elbencho_rw`), measuring
     this OST's throughput under combined load from every client instead of
     just this one.
+
+    If `oss_hosts` is given, their page cache is dropped between the write
+    and read passes (see `drop_oss_caches`), so the read measures real disk
+    I/O instead of data served back out of OSS-side RAM.
     """
     threads = threads or detect_cpu_thread_count()
     idx = ost_index(target)
@@ -467,7 +512,7 @@ def ost_rw_check(
 
     try:
         write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
-            ost_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts
+            ost_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts, oss_hosts
         )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_quad(target.name, f"elbencho failed: {exc}")
@@ -522,6 +567,7 @@ def pool_rw_check(
     elbencho_path: str = "elbencho",
     threads: int | None = None,
     hosts: list[str] | None = None,
+    oss_hosts: list[str] | None = None,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
     read pass across every OST in a pool at once, returning
@@ -542,6 +588,10 @@ def pool_rw_check(
     If `hosts` is given, every host runs `threads` worker threads against
     the shared `pool_dir` at once (see `_run_elbencho_rw`), measuring the
     pool's combined throughput under load from every client at once.
+
+    If `oss_hosts` is given, their page cache is dropped between the write
+    and read passes (see `drop_oss_caches`), so the read measures real disk
+    I/O instead of data served back out of OSS-side RAM.
     """
     pool_kwargs = dict(pool=pool_label if pool_label != "(unpooled)" else None, scope="pool")
     indices = _group_ost_indices(targets)
@@ -562,7 +612,7 @@ def pool_rw_check(
 
     try:
         write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
-            pool_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts
+            pool_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts, oss_hosts
         )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_quad(f"pool:{pool_label}", f"elbencho failed: {exc}", **pool_kwargs)
@@ -594,6 +644,7 @@ def run_perf_checks(
     ost_names: set[str] | None = None,
     pool_names: set[str] | None = None,
     hosts: list[str] | None = None,
+    oss_hosts: list[str] | None = None,
     on_result: Callable[[tuple[PerfResult, PerfResult, PerfResult, PerfResult]], None] | None = None,
 ) -> list[PerfResult]:
     """Run one write+read throughput/latency check against every OST in the
@@ -623,6 +674,11 @@ def run_perf_checks(
     once (`--hosts h1,h2,...`) -- so each check measures combined
     throughput from every host hitting the filesystem simultaneously,
     instead of just the local client.
+
+    If `oss_hosts` is given (a list of OSS/server hostnames reachable via
+    passwordless SSH), their page cache is dropped between each check's
+    write and read passes (see `drop_oss_caches`), so read results measure
+    real disk I/O instead of data served back out of OSS-side RAM.
 
     If `on_result` is given, it's called with each check's 4-tuple of
     results (write throughput/latency, read throughput/latency) as soon as
@@ -656,7 +712,7 @@ def run_perf_checks(
                 target, mount_path, topology.fsname, size, block_size, runtime, timeout,
                 warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
                 warn_ms=th.warn_ms, fail_ms=th.fail_ms,
-                elbencho_path=elbencho_path, threads=threads, hosts=hosts,
+                elbencho_path=elbencho_path, threads=threads, hosts=hosts, oss_hosts=oss_hosts,
             )
             for result in quad:
                 result.pool = target.pool
@@ -677,7 +733,7 @@ def run_perf_checks(
                 pool_label, group_targets, mount_path, topology.fsname, size, block_size, runtime, timeout,
                 warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
                 warn_ms=th.warn_ms, fail_ms=th.fail_ms,
-                elbencho_path=elbencho_path, threads=threads, hosts=hosts,
+                elbencho_path=elbencho_path, threads=threads, hosts=hosts, oss_hosts=oss_hosts,
             )
             results.extend(quad)
             if on_result:

@@ -122,6 +122,23 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
     type=click.Path(dir_okay=False, exists=True),
     help="Path to a file with one hostname per line, added to --hosts.",
 )
+@click.option(
+    "--oss-hosts",
+    default=None,
+    metavar="HOST1,HOST2,...",
+    help=(
+        "Comma-separated list of OSS/server hosts (reachable via passwordless "
+        "SSH) whose page cache is dropped between each check's write and read "
+        "passes, so read results measure real disk I/O instead of data served "
+        "back out of server-side RAM (ZFS ARC / page cache)."
+    ),
+)
+@click.option(
+    "--oss-hosts-file",
+    default=None,
+    type=click.Path(dir_okay=False, exists=True),
+    help="Path to a file with one OSS hostname per line, added to --oss-hosts.",
+)
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress the console table output.")
 def main(
@@ -147,6 +164,8 @@ def main(
     pool_names: tuple[str, ...],
     hosts: str | None,
     hosts_file: str | None,
+    oss_hosts: str | None,
+    oss_hosts_file: str | None,
     json_path: str | None,
     quiet: bool,
 ) -> None:
@@ -156,6 +175,10 @@ def main(
     if hosts_file:
         with open(hosts_file) as f:
             parsed_hosts.extend(line.strip() for line in f if line.strip())
+    parsed_oss_hosts = [h.strip() for h in (oss_hosts or "").split(",") if h.strip()]
+    if oss_hosts_file:
+        with open(oss_hosts_file) as f:
+            parsed_oss_hosts.extend(line.strip() for line in f if line.strip())
     cfg = Config(
         backend=backend,
         skip_perf=skip_perf,
@@ -178,6 +201,7 @@ def main(
             ost_names=set(ost_names) or None,
             pool_names=set(pool_names) or None,
             hosts=parsed_hosts or None,
+            oss_hosts=parsed_oss_hosts or None,
         ),
     )
 

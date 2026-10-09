@@ -58,5 +58,6 @@ class LustreBackend(StorageBackend):
             ost_names=cfg.ost_names,
             pool_names=cfg.pool_names,
             hosts=cfg.hosts,
+            oss_hosts=cfg.oss_hosts,
             on_result=on_result,
         )

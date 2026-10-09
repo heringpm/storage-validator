@@ -74,6 +74,13 @@ class PerfConfig:
     # from `--hosts` (comma-separated) and/or `--hosts-file` (one host per
     # line) on the CLI.
     hosts: Optional[list[str]] = None
+    # OSS/server hostnames (reachable via passwordless SSH) whose page cache
+    # is dropped between each check's write and read passes, so read results
+    # measure real disk I/O instead of data served back out of OSS-side RAM
+    # (ZFS ARC or Linux page cache), which `--direct` on the client has no
+    # effect on. Populated from `--oss-hosts` (comma-separated) and/or
+    # `--oss-hosts-file` (one host per line) on the CLI.
+    oss_hosts: Optional[list[str]] = None
 
     @property
     def default_thresholds(self) -> PerfThresholds:
