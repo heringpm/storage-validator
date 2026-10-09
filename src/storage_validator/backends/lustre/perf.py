@@ -133,7 +133,10 @@ def _run_elbencho_rw(
 
         row = _read_elbencho_csv_last_row(csv_path)
         if row is None or not row.get("MiB/s [last]") or not row.get("IO lat us [max]"):
-            raise ElbenchoError("could not parse elbencho CSV output (missing --lat?)")
+            raise ElbenchoError(
+                "could not parse elbencho CSV output (missing --lat?); "
+                f"parsed row: {row!r}"
+            )
         try:
             return float(row["MiB/s [last]"]), float(row["IO lat us [max]"])
         except ValueError as exc:
