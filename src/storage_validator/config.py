@@ -42,6 +42,10 @@ class PerfConfig:
     # defaults above; OSTs not in any pool (or in a pool with no override)
     # use the defaults above.
     pool_thresholds: dict[str, PerfThresholds] = field(default_factory=dict)
+    # MiB each parallel writer contributes to a pool's aggregate throughput
+    # test (total aggregate test size = this * number of OSTs in the pool).
+    # Defaults to `size_mb` when not set.
+    pool_size_mb_per_ost: Optional[int] = None
 
     @property
     def default_thresholds(self) -> PerfThresholds:

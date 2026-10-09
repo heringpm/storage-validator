@@ -44,4 +44,5 @@ class LustreBackend(StorageBackend):
             timeout=cfg.timeout,
             default_thresholds=cfg.default_thresholds,
             pool_thresholds=cfg.pool_thresholds,
+            pool_size_mb_per_ost=cfg.pool_size_mb_per_ost,
         )

@@ -51,8 +51,11 @@ storage-validator --warn-pct 75 --fail-pct 90 \
 Use different perf thresholds per Lustre OST pool (e.g. mixed drive types like
 flash vs. archive). Each `--pool-threshold` applies to OSTs in that pool and is
 repeatable; OSTs in pools without an override, or not in any pool, use the
-`--warn-mbps`/`--fail-mbps`/`--warn-ms`/`--fail-ms` defaults. Per-OST perf
-results are also aggregated into a per-pool PASS/WARN/FAIL summary:
+`--warn-mbps`/`--fail-mbps`/`--warn-ms`/`--fail-ms` defaults. In addition to
+the per-OST checks, each pool gets a real aggregate test: one file striped
+across every OST in the pool, written concurrently (one writer per stripe),
+measuring true aggregate MB/s and worst-case tail latency across the pool —
+not an average of the independent per-OST results:
 
 ```
 storage-validator \

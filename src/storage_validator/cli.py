@@ -59,6 +59,16 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
         "like flash vs. archive). Repeatable."
     ),
 )
+@click.option(
+    "--pool-size-mb-per-ost",
+    default=None,
+    type=int,
+    help=(
+        "MiB written by each concurrent writer in the per-pool aggregate "
+        "throughput test (total test size = this * OSTs in the pool). "
+        "Defaults to --size-mb."
+    ),
+)
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress the console table output.")
 def main(
@@ -74,6 +84,7 @@ def main(
     fail_ms: float,
     skip_perf: bool,
     pool_thresholds: tuple[str, ...],
+    pool_size_mb_per_ost: int | None,
     json_path: str | None,
     quiet: bool,
 ) -> None:
@@ -92,6 +103,7 @@ def main(
             warn_ms=warn_ms,
             fail_ms=fail_ms,
             pool_thresholds=parsed_pool_thresholds,
+            pool_size_mb_per_ost=pool_size_mb_per_ost,
         ),
     )
 
