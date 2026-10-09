@@ -54,6 +54,7 @@ def build_health_table(results: list[CheckResult]) -> Table:
 def build_perf_table(results: list[PerfResult]) -> Table:
     table = Table(title="Performance Checks")
     table.add_column("Target")
+    table.add_column("I/O")
     table.add_column("Kind")
     table.add_column("Value")
     table.add_column("Status")
@@ -61,6 +62,7 @@ def build_perf_table(results: list[PerfResult]) -> Table:
     for result in results:
         table.add_row(
             result.target,
+            result.io_mode,
             result.kind,
             f"{result.value:.2f} {result.unit}",
             _styled_status(result.status),

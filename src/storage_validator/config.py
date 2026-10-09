@@ -31,8 +31,9 @@ class PerfThresholds:
 @dataclass
 class PerfConfig:
     mount_path: Optional[str] = None
-    size_mb: int = 256
-    timeout: float = 60
+    # Subprocess timeout (s) for each `lfs`/elbencho call. Not the elbencho
+    # test runtime itself -- see `perf_runtime` below.
+    timeout: float = 90
     warn_mbps: float = 200.0
     fail_mbps: float = 50.0
     warn_ms: float = 10.0
@@ -42,18 +43,23 @@ class PerfConfig:
     # defaults above; OSTs not in any pool (or in a pool with no override)
     # use the defaults above.
     pool_thresholds: dict[str, PerfThresholds] = field(default_factory=dict)
-    # MiB each parallel writer contributes to a pool's aggregate throughput
-    # test (total aggregate test size = this * number of OSTs in the pool).
-    # Defaults to `size_mb` when not set.
-    pool_size_mb_per_ost: Optional[int] = None
     # Path to the `elbencho` binary, used for both per-OST and per-pool perf
     # checks. Defaults to "elbencho" (resolved via PATH) when not set.
     elbencho_path: str = "elbencho"
-    # Worker thread count elbencho uses per test file, for both the per-OST
-    # tests (one file, this many threads) and the per-pool tests (each
-    # pool/OST file gets this many threads). None means auto-detect from the
-    # host's total CPU threads (via `lscpu`).
+    # Total elbencho worker thread count for a single test run, whether that
+    # run targets one OST (per-OST check) or every OST in a pool at once
+    # (per-pool check). This is never multiplied by the number of OSTs in a
+    # pool -- a single elbencho invocation always uses exactly this many
+    # threads in total. None means auto-detect from the host's total CPU
+    # threads (via `lscpu`).
     perf_threads: Optional[int] = None
+    # elbencho `-s` test file size (e.g. "1g"), large enough that the test
+    # isn't just measuring client-side page cache.
+    perf_size: str = "1g"
+    # elbencho `-b` block size (e.g. "1m").
+    perf_block_size: str = "1m"
+    # elbencho `--timelimit` in seconds, applied to each read/write test run.
+    perf_runtime: int = 60
 
     @property
     def default_thresholds(self) -> PerfThresholds:

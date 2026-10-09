@@ -56,7 +56,7 @@ repeatable; OSTs in pools without an override, or not in any pool, use the
 per-OST checks and the per-pool checks use
 [`elbencho`](https://github.com/breuner/elbencho) (must be installed and on
 `PATH`, or pointed to explicitly with `--elbencho-path /path/to/elbencho`)
-instead of single-threaded `dd`. In addition to the per-OST checks,
+with Direct I/O (`--direct`). In addition to the per-OST checks,
 each pool gets a real multi-threaded aggregate test: one scratch file is
 single-striped onto each OST in the pool, then elbencho drives all of them
 concurrently, measuring true aggregate MB/s and worst-case tail latency across
@@ -68,27 +68,33 @@ storage-validator \
     --pool-threshold archive:100:20:20:80
 ```
 
-By default each elbencho invocation uses the host's total CPU thread count
-(parsed from `lscpu`) as its worker thread count — for a per-OST check that
-means `N` threads driving the one scratch file on that OST, and for a
-per-pool check it means `N` threads per OST scratch file (so a pool with 4
-OSTs on a 16-thread host runs with 64 total worker threads). Override this
-with `--perf-threads` if you want a specific thread count instead (e.g. to
-match an expected client concurrency, or to avoid oversubscribing the host):
+Every check (per-OST and per-pool) runs one write pass and one read pass with
+`elbencho`, each deriving both its throughput ("MiB/s [last]") and its latency
+("IO lat us [max]") from that single pass's output — there's no separate
+latency-only test. By default each elbencho invocation uses the host's total
+CPU thread count (parsed from `lscpu`) as its worker thread count. This total
+is never multiplied by the number of OSTs in a pool — a per-pool run still
+uses exactly that many threads in total, spread across the pool's scratch
+files, so a run on a single system never exceeds the host's thread count.
+Override this with `--perf-threads` if you want a specific thread count
+instead:
 
 ```
 storage-validator --perf-threads 4
 ```
 
-The latency checks' scratch file size is scaled to the thread count (4K per
-thread) so every elbencho worker always has at least one 4K block of its own
-to write, regardless of how many threads are in use.
+Tune the dataset size, block size, and per-pass runtime used by every
+read/write test (defaults: 1024 MiB, 1m blocks, 60s):
+
+```
+storage-validator --size-mb 2048 --block-size 1m --timelimit 120
+```
 
 Point perf checks at a specific client mount (autodetected from `/proc/mounts`
 otherwise):
 
 ```
-storage-validator --mount-path /mnt/scratch --size-mb 512
+storage-validator --mount-path /mnt/scratch --size-mb 2048
 ```
 
 The process exit code reflects the overall report status: `0` = PASS,

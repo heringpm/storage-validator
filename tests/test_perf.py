@@ -8,24 +8,16 @@ OST0 = Target(name="scratch-OST0000", kind="ost", uuid="ost0_uuid")
 BAD_NAME = Target(name="not-an-ost", kind="ost", uuid="x")
 
 
+def shell_result(returncode, stdout="", stderr=""):
+    from storage_validator.backends.lustre.shell import CommandResult
+
+    return CommandResult(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
 def test_ost_index():
     assert perf.ost_index(OST0) == 0
     assert perf.ost_index(Target(name="scratch-OST000a", kind="ost")) == 10
     assert perf.ost_index(BAD_NAME) is None
-
-
-def test_parse_dd_rate_mbps():
-    stderr = "1048576 bytes (1.0 MB, 1.0 MiB) copied, 0.0123 s, 85.2 MB/s"
-    assert perf.parse_dd_rate_mbps(stderr) == 85.2
-
-
-def test_parse_dd_rate_mbps_gbps_unit():
-    stderr = "copied, 1.0 s, 1.5 GB/s"
-    assert perf.parse_dd_rate_mbps(stderr) == 1536.0
-
-
-def test_parse_dd_rate_mbps_unparsable():
-    assert perf.parse_dd_rate_mbps("garbage output") is None
 
 
 def test_detect_cpu_thread_count_parses_lscpu():
@@ -49,179 +41,18 @@ def test_detect_cpu_thread_count_falls_back_on_missing_lscpu():
         assert perf.detect_cpu_thread_count() == 4
 
 
-def _ok(stdout="", stderr=""):
-    return shell_result(0, stdout, stderr)
-
-
-def shell_result(returncode, stdout="", stderr=""):
-    from storage_validator.backends.lustre.shell import CommandResult
-
-    return CommandResult(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
-
-
-def _fake_single_elbencho_run_cmd(rate=None, lat_us=None):
-    """Fake `run_cmd` for a single-OST `throughput_check`/`latency_check`
-    call: `lfs setstripe` succeeds, `elbencho` writes one fake CSV row.
+def _fake_elbencho_run_cmd(rate=300.0, lat_us=1000.0):
+    """Fake `run_cmd`: `lfs setstripe` succeeds; `elbencho` writes one fake
+    CSV row (same rate/latency for every call) to the `--csvfile` path.
     """
 
     def fake_run_cmd(args, timeout=30):
         if args[0] == "lfs":
             return shell_result(0, "", "")
-        if args[0] == "elbencho":
+        if "elbencho" in args[0]:
             csv_path = args[args.index("--csvfile") + 1]
             with open(csv_path, "w", newline="") as fh:
-                writer = csv.DictWriter(
-                    fh, fieldnames=["MiB/s [last]", "IO lat us [max]"]
-                )
-                writer.writeheader()
-                writer.writerow(
-                    {
-                        "MiB/s [last]": rate if rate is not None else 300.0,
-                        "IO lat us [max]": lat_us if lat_us is not None else 1000.0,
-                    }
-                )
-            return shell_result(0, "", "")
-        raise AssertionError(f"unexpected args: {args}")
-
-    return fake_run_cmd
-
-
-def test_throughput_check_pass(tmp_path):
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=_fake_single_elbencho_run_cmd(rate=300.0),
-    ), patch("os.remove"):
-        result = perf.throughput_check(OST0, str(tmp_path), threads=1)
-    assert result.status == "PASS"
-    assert result.value == 300.0
-
-
-def test_throughput_check_warn(tmp_path):
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=_fake_single_elbencho_run_cmd(rate=100.0),
-    ), patch("os.remove"):
-        result = perf.throughput_check(OST0, str(tmp_path), threads=1)
-    assert result.status == "WARN"
-
-
-def test_throughput_check_fail_low_rate(tmp_path):
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=_fake_single_elbencho_run_cmd(rate=10.0),
-    ), patch("os.remove"):
-        result = perf.throughput_check(OST0, str(tmp_path), threads=1)
-    assert result.status == "FAIL"
-
-
-def test_throughput_check_setstripe_failure(tmp_path):
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        return_value=shell_result(1, "", "setstripe error"),
-    ), patch("os.remove"):
-        result = perf.throughput_check(OST0, str(tmp_path))
-    assert result.status == "FAIL"
-    assert "setstripe" in result.message
-
-
-def test_throughput_check_elbencho_failure(tmp_path):
-    def fake_run_cmd(args, timeout=30):
-        if args[0] == "lfs":
-            return shell_result(0, "", "")
-        if args[0] == "elbencho":
-            return shell_result(1, "", "elbencho: command not found")
-        raise AssertionError(args)
-
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=fake_run_cmd,
-    ), patch("os.remove"):
-        result = perf.throughput_check(OST0, str(tmp_path), threads=1)
-    assert result.status == "FAIL"
-    assert "elbencho" in result.message
-
-
-def test_throughput_check_uses_configured_threads(tmp_path):
-    captured_cmds = []
-
-    def fake_run_cmd(args, timeout=30):
-        captured_cmds.append(args)
-        return _fake_single_elbencho_run_cmd(rate=300.0)(args, timeout=timeout)
-
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=fake_run_cmd,
-    ), patch("os.remove"):
-        perf.throughput_check(OST0, str(tmp_path), threads=8)
-
-    elbencho_cmd = next(c for c in captured_cmds if c[0] == "elbencho")
-    assert elbencho_cmd[elbencho_cmd.index("-t") + 1] == "8"
-
-
-def test_throughput_check_defaults_threads_to_detected_cpu_count(tmp_path):
-    captured_cmds = []
-
-    def fake_run_cmd(args, timeout=30):
-        if args == ["lscpu"]:
-            return shell_result(0, "CPU(s): 6\n", "")
-        captured_cmds.append(args)
-        return _fake_single_elbencho_run_cmd(rate=300.0)(args, timeout=timeout)
-
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=fake_run_cmd,
-    ), patch("os.remove"):
-        perf.throughput_check(OST0, str(tmp_path))
-
-    elbencho_cmd = next(c for c in captured_cmds if c[0] == "elbencho")
-    assert elbencho_cmd[elbencho_cmd.index("-t") + 1] == "6"
-
-
-def test_throughput_check_bad_target_name(tmp_path):
-    result = perf.throughput_check(BAD_NAME, str(tmp_path), threads=1)
-    assert result.status == "FAIL"
-
-
-def test_latency_check_pass(tmp_path):
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=_fake_single_elbencho_run_cmd(lat_us=1000.0),
-    ), patch("os.remove"):
-        result = perf.latency_check(OST0, str(tmp_path), threads=1)
-    assert result.status == "PASS"
-    assert result.value == 1.0
-
-
-def test_latency_check_fail_slow(tmp_path):
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=_fake_single_elbencho_run_cmd(lat_us=100000.0),
-    ), patch("os.remove"):
-        result = perf.latency_check(OST0, str(tmp_path), threads=1)
-    assert result.status == "FAIL"
-
-
-def _fake_elbencho_run_cmd(rate_by_pool=None, lat_us_by_pool=None, csv_fieldname=None):
-    """Build a fake `run_cmd` for pool tests: `lfs setstripe` always
-    succeeds; `elbencho` writes a fake CSV row (picking a rate/latency by
-    matching a pool-label keyword found in its `--csvfile` path, else a
-    default) to the `--csvfile` path it's given, and reports success.
-    """
-    rate_by_pool = rate_by_pool or {}
-    lat_by_pool = lat_us_by_pool or {}
-
-    def fake_run_cmd(args, timeout=30):
-        if args[0] == "lfs":
-            return shell_result(0, "", "")
-        if args[0] == "elbencho":
-            csv_path = args[args.index("--csvfile") + 1]
-            joined = " ".join(args)
-            rate = next((r for k, r in rate_by_pool.items() if k in joined), 300.0)
-            lat_us = next((l for k, l in lat_by_pool.items() if k in joined), 1000.0)
-            with open(csv_path, "w", newline="") as fh:
-                writer = csv.DictWriter(
-                    fh, fieldnames=["MiB/s [last]", "IO lat us [max]"]
-                )
+                writer = csv.DictWriter(fh, fieldnames=["MiB/s [last]", "IO lat us [max]"])
                 writer.writeheader()
                 writer.writerow({"MiB/s [last]": rate, "IO lat us [max]": lat_us})
             return shell_result(0, "", "")
@@ -230,7 +61,126 @@ def _fake_elbencho_run_cmd(rate_by_pool=None, lat_us_by_pool=None, csv_fieldname
     return fake_run_cmd
 
 
-def test_run_perf_checks_runs_both_per_ost(tmp_path):
+def test_ost_rw_check_pass(tmp_path):
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=_fake_elbencho_run_cmd(rate=300.0, lat_us=1000.0),
+    ), patch("os.remove"):
+        t_result, l_result = perf.ost_rw_check(OST0, str(tmp_path), "write", threads=1)
+    assert t_result.status == "PASS"
+    assert t_result.value == 300.0
+    assert l_result.value == 1.0
+    assert t_result.io_mode == "write"
+
+
+def test_ost_rw_check_warn(tmp_path):
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=_fake_elbencho_run_cmd(rate=100.0),
+    ), patch("os.remove"):
+        t_result, _ = perf.ost_rw_check(OST0, str(tmp_path), "read", threads=1)
+    assert t_result.status == "WARN"
+    assert t_result.io_mode == "read"
+
+
+def test_ost_rw_check_fail_low_rate(tmp_path):
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=_fake_elbencho_run_cmd(rate=10.0),
+    ), patch("os.remove"):
+        t_result, _ = perf.ost_rw_check(OST0, str(tmp_path), "write", threads=1)
+    assert t_result.status == "FAIL"
+
+
+def test_ost_rw_check_setstripe_failure(tmp_path):
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        return_value=shell_result(1, "", "setstripe error"),
+    ), patch("os.remove"):
+        t_result, l_result = perf.ost_rw_check(OST0, str(tmp_path), "write", threads=1)
+    assert t_result.status == "FAIL"
+    assert l_result.status == "FAIL"
+    assert "setstripe" in t_result.message
+
+
+def test_ost_rw_check_elbencho_failure(tmp_path):
+    def fake_run_cmd(args, timeout=30):
+        if args[0] == "lfs":
+            return shell_result(0, "", "")
+        return shell_result(1, "", "elbencho: command not found")
+
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"):
+        t_result, _ = perf.ost_rw_check(OST0, str(tmp_path), "write", threads=1)
+    assert t_result.status == "FAIL"
+    assert "elbencho" in t_result.message
+
+
+def test_ost_rw_check_uses_configured_threads(tmp_path):
+    captured_cmds = []
+
+    def fake_run_cmd(args, timeout=30):
+        captured_cmds.append(args)
+        return _fake_elbencho_run_cmd()(args, timeout=timeout)
+
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"):
+        perf.ost_rw_check(OST0, str(tmp_path), "write", threads=8)
+
+    elbencho_cmd = next(c for c in captured_cmds if "elbencho" in c[0])
+    assert elbencho_cmd[elbencho_cmd.index("-t") + 1] == "8"
+    assert "--direct" in elbencho_cmd
+    assert "-w" in elbencho_cmd
+
+
+def test_ost_rw_check_read_uses_dash_r(tmp_path):
+    captured_cmds = []
+
+    def fake_run_cmd(args, timeout=30):
+        captured_cmds.append(args)
+        return _fake_elbencho_run_cmd()(args, timeout=timeout)
+
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"):
+        perf.ost_rw_check(OST0, str(tmp_path), "read", threads=1)
+
+    elbencho_cmd = next(c for c in captured_cmds if "elbencho" in c[0])
+    assert "-r" in elbencho_cmd
+    assert "-w" not in elbencho_cmd
+
+
+def test_ost_rw_check_defaults_threads_to_detected_cpu_count(tmp_path):
+    captured_cmds = []
+
+    def fake_run_cmd(args, timeout=30):
+        if args == ["lscpu"]:
+            return shell_result(0, "CPU(s): 6\n", "")
+        captured_cmds.append(args)
+        return _fake_elbencho_run_cmd()(args, timeout=timeout)
+
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"):
+        perf.ost_rw_check(OST0, str(tmp_path), "write")
+
+    elbencho_cmd = next(c for c in captured_cmds if "elbencho" in c[0])
+    assert elbencho_cmd[elbencho_cmd.index("-t") + 1] == "6"
+
+
+def test_ost_rw_check_bad_target_name(tmp_path):
+    t_result, l_result = perf.ost_rw_check(BAD_NAME, str(tmp_path), "write", threads=1)
+    assert t_result.status == "FAIL"
+    assert l_result.status == "FAIL"
+
+
+def test_run_perf_checks_runs_read_and_write_per_ost(tmp_path):
     from storage_validator.models import Topology
 
     topo = Topology(fsname="scratch", osts=[OST0])
@@ -241,10 +191,12 @@ def test_run_perf_checks_runs_both_per_ost(tmp_path):
         results = perf.run_perf_checks(topo, str(tmp_path), threads=1)
     kinds = {r.kind for r in results}
     assert kinds == {"throughput", "latency"}
-    # 2 per-OST results + 2 real pool-level aggregate results (1 pool: unpooled)
-    assert len(results) == 4
+    # 2 per-OST results (write+read) + 2 pool results (write+read), * 2 kinds = 8
+    assert len(results) == 8
+    io_modes = {r.io_mode for r in results}
+    assert io_modes == {"write", "read"}
     pool_results = [r for r in results if r.scope == "pool"]
-    assert len(pool_results) == 2
+    assert len(pool_results) == 4
     assert {r.target for r in pool_results} == {"pool:(unpooled)"}
 
 
@@ -259,19 +211,15 @@ def test_run_perf_checks_aggregates_per_pool_with_custom_thresholds(tmp_path):
     def fake_run_cmd(args, timeout=30):
         if args[0] == "lfs":
             return shell_result(0, "", "")
-        if args[0] == "elbencho":
-            csv_path = args[args.index("--csvfile") + 1]
-            joined = " ".join(args)
-            # fast for flash OST/pool, slow for archive OST/pool
-            rate = 900.0 if ("flash" in joined or "OST0000" in joined) else 60.0
-            with open(csv_path, "w", newline="") as fh:
-                writer = csv.DictWriter(
-                    fh, fieldnames=["MiB/s [last]", "IO lat us [max]"]
-                )
-                writer.writeheader()
-                writer.writerow({"MiB/s [last]": rate, "IO lat us [max]": 1000.0})
-            return shell_result(0, "", "")
-        raise AssertionError(f"unexpected args: {args}")
+        csv_path = args[args.index("--csvfile") + 1]
+        joined = " ".join(args)
+        # fast for flash OST/pool, slow for archive OST/pool
+        rate = 900.0 if ("flash" in joined or "OST0000" in joined) else 60.0
+        with open(csv_path, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["MiB/s [last]", "IO lat us [max]"])
+            writer.writeheader()
+            writer.writerow({"MiB/s [last]": rate, "IO lat us [max]": 1000.0})
+        return shell_result(0, "", "")
 
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
@@ -292,39 +240,39 @@ def test_run_perf_checks_aggregates_per_pool_with_custom_thresholds(tmp_path):
         )
 
     archive_throughput = next(
-        r for r in results if r.target == "scratch-OST0001" and r.kind == "throughput"
+        r for r in results
+        if r.target == "scratch-OST0001" and r.kind == "throughput" and r.io_mode == "write"
     )
     # 60 MB/s is below the default warn (200) but within archive's custom
     # warn threshold (70 is warn, 30 is fail) -> WARN not FAIL.
     assert archive_throughput.status == "WARN"
 
     pool_throughput = {
-        r.pool: r for r in results if r.scope == "pool" and r.kind == "throughput"
+        r.pool: r for r in results
+        if r.scope == "pool" and r.kind == "throughput" and r.io_mode == "write"
     }
     assert set(pool_throughput) == {"flash", "archive"}
     assert pool_throughput["flash"].status == "PASS"
     assert pool_throughput["archive"].status == "WARN"
 
 
-def test_pool_throughput_check_setstripe_failure(tmp_path):
+def test_pool_rw_check_setstripe_failure(tmp_path):
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         return_value=shell_result(1, "", "setstripe error"),
     ), patch("os.remove"):
-        result = perf.pool_throughput_check(
-            "flash", [OST0], "scratch", str(tmp_path), threads_per_ost=1
-        )
-    assert result.status == "FAIL"
-    assert "setstripe" in result.message
+        t_result, _ = perf.pool_rw_check("flash", [OST0], str(tmp_path), "write", threads=1)
+    assert t_result.status == "FAIL"
+    assert "setstripe" in t_result.message
 
 
-def test_pool_throughput_check_no_valid_indices(tmp_path):
-    result = perf.pool_throughput_check("flash", [BAD_NAME], "scratch", str(tmp_path))
-    assert result.status == "FAIL"
-    assert "OST indices" in result.message
+def test_pool_rw_check_no_valid_indices(tmp_path):
+    t_result, _ = perf.pool_rw_check("flash", [BAD_NAME], str(tmp_path), "write")
+    assert t_result.status == "FAIL"
+    assert "OST indices" in t_result.message
 
 
-def test_pool_throughput_check_single_stripes_each_ost(tmp_path):
+def test_pool_rw_check_single_stripes_each_ost(tmp_path):
     captured_cmds = []
 
     def fake_run_cmd(args, timeout=30):
@@ -337,88 +285,48 @@ def test_pool_throughput_check_single_stripes_each_ost(tmp_path):
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=fake_run_cmd,
     ), patch("os.remove"):
-        result = perf.pool_throughput_check(
-            "(unpooled)", [ost0, ost1], "scratch", str(tmp_path), threads_per_ost=1
+        t_result, _ = perf.pool_rw_check(
+            "(unpooled)", [ost0, ost1], str(tmp_path), "write", threads=4
         )
 
     setstripe_cmds = [c for c in captured_cmds if c[0] == "lfs"]
     assert len(setstripe_cmds) == 2
     assert all("-i" in c and "-c" in c and "1" in c for c in setstripe_cmds)
-    elbencho_cmd = next(c for c in captured_cmds if c[0] == "elbencho")
-    assert "-t" in elbencho_cmd
-    assert elbencho_cmd[elbencho_cmd.index("-t") + 1] == "2"
-    assert result.status == "PASS"
-    assert result.value == 300.0
+    elbencho_cmd = next(c for c in captured_cmds if "elbencho" in c[0])
+    # threads is never multiplied by OST count -- always the configured total
+    assert elbencho_cmd[elbencho_cmd.index("-t") + 1] == "4"
+    assert t_result.status == "PASS"
+    assert t_result.value == 300.0
 
 
-def test_pool_throughput_check_uses_threads_per_ost(tmp_path):
-    captured_cmds = []
-
-    def fake_run_cmd(args, timeout=30):
-        captured_cmds.append(args)
-        return _fake_elbencho_run_cmd()(args, timeout=timeout)
-
-    ost0 = Target(name="scratch-OST0000", kind="ost")
-    ost1 = Target(name="scratch-OST0001", kind="ost")
-    with patch(
-        "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=fake_run_cmd,
-    ), patch("os.remove"):
-        perf.pool_throughput_check(
-            "(unpooled)", [ost0, ost1], "scratch", str(tmp_path), threads_per_ost=4
-        )
-
-    elbencho_cmd = next(c for c in captured_cmds if c[0] == "elbencho")
-    # 2 OSTs * 4 threads/OST = 8 total worker threads
-    assert elbencho_cmd[elbencho_cmd.index("-t") + 1] == "8"
-
-
-def test_pool_throughput_check_elbencho_failure(tmp_path):
+def test_pool_rw_check_elbencho_failure(tmp_path):
     def fake_run_cmd(args, timeout=30):
         if args[0] == "lfs":
             return shell_result(0, "", "")
-        if args[0] == "elbencho":
-            return shell_result(1, "", "elbencho: command not found")
-        raise AssertionError(args)
+        return shell_result(1, "", "elbencho: command not found")
 
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
         side_effect=fake_run_cmd,
     ), patch("os.remove"):
-        result = perf.pool_throughput_check(
-            "flash", [OST0], "scratch", str(tmp_path), threads_per_ost=1
-        )
-    assert result.status == "FAIL"
-    assert "elbencho" in result.message
+        t_result, _ = perf.pool_rw_check("flash", [OST0], str(tmp_path), "write", threads=1)
+    assert t_result.status == "FAIL"
+    assert "elbencho" in t_result.message
 
 
-def test_pool_latency_check_uses_elbencho_max_latency(tmp_path):
-    def fake_run_cmd(args, timeout=30):
-        if args[0] == "lfs":
-            return shell_result(0, "", "")
-        if args[0] == "elbencho":
-            csv_path = args[args.index("--csvfile") + 1]
-            with open(csv_path, "w", newline="") as fh:
-                writer = csv.DictWriter(
-                    fh, fieldnames=["MiB/s [last]", "IO lat us [max]"]
-                )
-                writer.writeheader()
-                writer.writerow({"MiB/s [last]": 100.0, "IO lat us [max]": 100000.0})
-            return shell_result(0, "", "")
-        raise AssertionError(args)
-
+def test_pool_rw_check_uses_elbencho_max_latency(tmp_path):
     ost0 = Target(name="scratch-OST0000", kind="ost", pool="flash")
     ost1 = Target(name="scratch-OST0001", kind="ost", pool="flash")
     with patch(
         "storage_validator.backends.lustre.perf.shell.run_cmd",
-        side_effect=fake_run_cmd,
+        side_effect=_fake_elbencho_run_cmd(rate=100.0, lat_us=100000.0),
     ), patch("os.remove"):
-        result = perf.pool_latency_check(
-            "flash", [ost0, ost1], "scratch", str(tmp_path), threads_per_ost=1
+        _, l_result = perf.pool_rw_check(
+            "flash", [ost0, ost1], str(tmp_path), "write", threads=1
         )
 
-    assert result.value == 100.0  # 100000 us -> 100 ms
-    assert result.scope == "pool"
+    assert l_result.value == 100.0  # 100000 us -> 100 ms
+    assert l_result.scope == "pool"
 
 
 def test_resolve_thresholds_falls_back_to_default():

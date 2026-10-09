@@ -89,6 +89,10 @@ class PerfResult:
     message: str = ""
     pool: Optional[str] = None
     scope: Literal["ost", "pool"] = "ost"
+    # Which direction this result came from: a single read or write elbencho
+    # run (throughput and latency for a given run are both derived from that
+    # one run's CSV output, not from separate tests).
+    io_mode: Literal["read", "write"] = "write"
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +104,7 @@ class PerfResult:
             "message": self.message,
             "pool": self.pool,
             "scope": self.scope,
+            "io_mode": self.io_mode,
         }
 
 

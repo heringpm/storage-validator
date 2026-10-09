@@ -39,8 +39,10 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
 @click.command()
 @click.option("--backend", default="lustre", show_default=True, help="Storage backend to validate.")
 @click.option("--mount-path", default=None, help="Client mount point to use for perf checks (autodetected if omitted).")
-@click.option("--size-mb", default=256, show_default=True, help="Size (MiB) of the throughput test file.")
-@click.option("--timeout", default=60.0, show_default=True, help="Timeout (s) for each perf/health subprocess call.")
+@click.option("--size-mb", "size_mb", default=1024, show_default=True, type=int, help="Size (MiB) of each read/write elbencho test's dataset.")
+@click.option("--block-size", default="1m", show_default=True, help="elbencho I/O block size (e.g. 1m, 4k).")
+@click.option("--timelimit", "perf_runtime", default=60, show_default=True, type=int, help="elbencho test runtime (s) per read/write run.")
+@click.option("--timeout", default=90.0, show_default=True, help="Timeout (s) for each perf/health subprocess call.")
 @click.option("--warn-pct", default=80, show_default=True, help="OST/MDT usage %% that triggers a WARN.")
 @click.option("--fail-pct", default=95, show_default=True, help="OST/MDT usage %% that triggers a FAIL.")
 @click.option("--warn-mbps", default=200.0, show_default=True, help="Throughput (MB/s) below which to WARN.")
@@ -60,16 +62,6 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
     ),
 )
 @click.option(
-    "--pool-size-mb-per-ost",
-    default=None,
-    type=int,
-    help=(
-        "MiB written by each concurrent writer in the per-pool aggregate "
-        "throughput test (total test size = this * OSTs in the pool). "
-        "Defaults to --size-mb."
-    ),
-)
-@click.option(
     "--elbencho-path",
     default="elbencho",
     show_default=True,
@@ -80,9 +72,9 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
     default=None,
     type=int,
     help=(
-        "elbencho worker thread count per test file, used for both the "
-        "per-OST and per-pool (per-OST-file) perf checks. Defaults to the "
-        "host's total CPU thread count (from `lscpu`)."
+        "Total elbencho worker thread count for a single perf test run "
+        "(per-OST or per-pool). Defaults to the host's total CPU thread "
+        "count (from `lscpu`)."
     ),
 )
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
@@ -91,6 +83,8 @@ def main(
     backend: str,
     mount_path: str | None,
     size_mb: int,
+    block_size: str,
+    perf_runtime: int,
     timeout: float,
     warn_pct: int,
     fail_pct: int,
@@ -100,7 +94,6 @@ def main(
     fail_ms: float,
     skip_perf: bool,
     pool_thresholds: tuple[str, ...],
-    pool_size_mb_per_ost: int | None,
     elbencho_path: str,
     perf_threads: int | None,
     json_path: str | None,
@@ -114,14 +107,15 @@ def main(
         health=HealthConfig(warn_pct=warn_pct, fail_pct=fail_pct),
         perf=PerfConfig(
             mount_path=mount_path,
-            size_mb=size_mb,
+            perf_size=f"{size_mb}m",
+            perf_block_size=block_size,
+            perf_runtime=perf_runtime,
             timeout=timeout,
             warn_mbps=warn_mbps,
             fail_mbps=fail_mbps,
             warn_ms=warn_ms,
             fail_ms=fail_ms,
             pool_thresholds=parsed_pool_thresholds,
-            pool_size_mb_per_ost=pool_size_mb_per_ost,
             elbencho_path=elbencho_path,
             perf_threads=perf_threads,
         ),
