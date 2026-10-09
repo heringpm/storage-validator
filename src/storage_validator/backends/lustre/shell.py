@@ -10,10 +10,14 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 
-# When True, `run_cmd` only prints the command it would have run (via
-# `DRY_RUN_SINK`, a callable taking the formatted command line) instead of
-# executing it, returning a canned successful result. Toggled on by the
-# CLI's `--dry-run` flag.
+# When True, perf.py prints the `lfs setstripe`/`elbencho` commands it
+# would have run (via `DRY_RUN_SINK`, a callable taking the formatted
+# command line) instead of actually running them. Toggled on by the CLI's
+# `--dry-run` flag. `run_cmd` itself does NOT check this flag -- discovery
+# and health checks are read-only `lctl`/`lfs` commands, so they always run
+# for real even in dry-run mode. That's what lets dry-run discover the
+# actual OST/pool topology and print the real elbencho commands that would
+# be run against it, instead of an empty topology with nothing to show.
 DRY_RUN = False
 DRY_RUN_SINK = print
 
@@ -21,6 +25,14 @@ DRY_RUN_SINK = print
 def set_dry_run(enabled: bool) -> None:
     global DRY_RUN
     DRY_RUN = enabled
+
+
+def print_dry_run(args: list[str]) -> None:
+    """Print `args` as the command that would have been run, prefixed with
+    `[DRY RUN]`. Used by perf.py to announce `lfs setstripe`/`elbencho`
+    calls it's skipping in dry-run mode.
+    """
+    DRY_RUN_SINK(f"[DRY RUN] {shlex.join(args)}")
 
 
 class CommandError(Exception):
@@ -49,14 +61,7 @@ def run_cmd(args: list[str], timeout: float = 30) -> CommandResult:
 
     Raises CommandError if the binary is missing or the call times out.
     A non-zero return code does NOT raise; callers inspect `.ok`/`.returncode`.
-
-    If `DRY_RUN` is enabled, the command is only printed (via `DRY_RUN_SINK`)
-    and not actually executed; a canned successful `CommandResult` (empty
-    stdout/stderr, returncode 0) is returned instead.
     """
-    if DRY_RUN:
-        DRY_RUN_SINK(f"[DRY RUN] {shlex.join(args)}")
-        return CommandResult(args=args, returncode=0, stdout="", stderr="")
     try:
         proc = subprocess.run(
             args,

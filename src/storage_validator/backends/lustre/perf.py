@@ -140,20 +140,22 @@ def _run_elbencho_rw(
     csv_fd, csv_path = tempfile.mkstemp(prefix="storage_validator_elbencho_", suffix=".csv")
     os.close(csv_fd)
     os.remove(csv_path)
+    cmd = [
+        elbencho_path, io_flag, "-t", str(threads), "-b", block_size,
+        "-s", size, "--direct", "--lat", "--timelimit", str(runtime),
+        "--csvfile", csv_path,
+    ] + extra_flags + paths
+    if shell.DRY_RUN:
+        shell.print_dry_run(cmd)
+        try:
+            os.remove(csv_path)
+        except OSError:
+            pass
+        return 0.0, 0.0
     try:
-        result = shell.run_cmd(
-            [
-                elbencho_path, io_flag, "-t", str(threads), "-b", block_size,
-                "-s", size, "--direct", "--lat", "--timelimit", str(runtime),
-                "--csvfile", csv_path,
-            ] + extra_flags + paths,
-            timeout=timeout,
-        )
+        result = shell.run_cmd(cmd, timeout=timeout)
         if not result.ok:
             raise ElbenchoError((result.stderr or result.stdout).strip())
-        if shell.DRY_RUN:
-            # elbencho never actually ran, so there's no CSV to parse.
-            return 0.0, 0.0
 
         row = _read_elbencho_csv_last_row(csv_path, "WRITE" if mode == "write" else "READ")
         if row is None or not row.get("MiB/s [last]") or not row.get("IO lat us [max]"):
@@ -281,9 +283,11 @@ def ost_rw_check(
     ]
     try:
         for path in paths:
-            setstripe = shell.run_cmd(
-                ["lfs", "setstripe", "-i", str(idx), "-c", "1", path], timeout=timeout
-            )
+            setstripe_cmd = ["lfs", "setstripe", "-i", str(idx), "-c", "1", path]
+            if shell.DRY_RUN:
+                shell.print_dry_run(setstripe_cmd)
+                continue
+            setstripe = shell.run_cmd(setstripe_cmd, timeout=timeout)
             if not setstripe.ok:
                 return _fail_quad(target.name, f"lfs setstripe failed: {setstripe.stderr.strip()}")
 
@@ -356,9 +360,11 @@ def _setstripe_per_file(file_osts: list[int], paths: list[str], timeout: float) 
     Returns an error message if any `lfs setstripe` call fails, else None.
     """
     for idx, path in zip(file_osts, paths):
-        result = shell.run_cmd(
-            ["lfs", "setstripe", "-i", str(idx), "-c", "1", path], timeout=timeout
-        )
+        setstripe_cmd = ["lfs", "setstripe", "-i", str(idx), "-c", "1", path]
+        if shell.DRY_RUN:
+            shell.print_dry_run(setstripe_cmd)
+            continue
+        result = shell.run_cmd(setstripe_cmd, timeout=timeout)
         if not result.ok:
             return f"lfs setstripe failed for OST {idx}: {result.stderr.strip()}"
     return None

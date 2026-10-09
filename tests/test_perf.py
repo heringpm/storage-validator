@@ -113,23 +113,30 @@ def test_ost_rw_check_fail_low_rate(tmp_path):
     assert rt.status == "FAIL"
 
 
-def test_ost_rw_check_dry_run_does_not_parse_csv(tmp_path):
-    """In dry-run mode, elbencho never actually runs, so there's no CSV to
-    parse -- the check must short-circuit to (0.0, 0.0) rather than raising
-    an ElbenchoError about missing/unparsable CSV output."""
+def test_ost_rw_check_dry_run_prints_commands_and_skips_execution(tmp_path):
+    """In dry-run mode, neither `lfs setstripe` nor `elbencho` should
+    actually be run -- they're only printed via `shell.print_dry_run` --
+    and the check must short-circuit to (0.0, 0.0) rather than raising an
+    ElbenchoError about missing/unparsable CSV output."""
     from storage_validator.backends.lustre import shell
 
+    printed = []
     shell.set_dry_run(True)
     try:
         with patch(
             "storage_validator.backends.lustre.perf.shell.run_cmd",
-            return_value=shell_result(0, "", ""),
+        ) as mock_run_cmd, patch.object(
+            shell, "DRY_RUN_SINK", printed.append
         ), patch("os.remove"):
             wt, wl, rt, rl = perf.ost_rw_check(OST0, str(tmp_path), threads=1)
     finally:
         shell.set_dry_run(False)
     assert wt.value == 0.0
     assert "dry run" in wt.message
+    mock_run_cmd.assert_not_called()
+    joined = " ".join(printed)
+    assert "lfs setstripe" in joined
+    assert "elbencho" in joined
 
 
 def test_ost_rw_check_setstripe_failure(tmp_path):
