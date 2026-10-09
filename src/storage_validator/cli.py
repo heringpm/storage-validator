@@ -41,7 +41,7 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
 @click.command()
 @click.option("--backend", default="lustre", show_default=True, help="Storage backend to validate.")
 @click.option("--mount-path", default=None, help="Client mount point to use for perf checks (autodetected if omitted).")
-@click.option("--size-mb", "size_mb", default=1024, show_default=True, type=int, help="Size (MiB) of each read/write elbencho test's dataset.")
+@click.option("--size", "perf_size", default="1g", show_default=True, help="Size of each read/write elbencho test's dataset (e.g. 1g, 500m, 10g).")
 @click.option("--block-size", default="1m", show_default=True, help="elbencho I/O block size (e.g. 1m, 4k).")
 @click.option("--timelimit", "perf_runtime", default=60, show_default=True, type=int, help="elbencho test runtime (s) per read/write run.")
 @click.option("--timeout", default=90.0, show_default=True, help="Timeout (s) for each perf/health subprocess call.")
@@ -104,7 +104,7 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
 def main(
     backend: str,
     mount_path: str | None,
-    size_mb: int,
+    perf_size: str,
     block_size: str,
     perf_runtime: int,
     timeout: float,
@@ -133,7 +133,7 @@ def main(
         health=HealthConfig(warn_pct=warn_pct, fail_pct=fail_pct),
         perf=PerfConfig(
             mount_path=mount_path,
-            perf_size=f"{size_mb}m",
+            perf_size=perf_size,
             perf_block_size=block_size,
             perf_runtime=perf_runtime,
             timeout=timeout,
