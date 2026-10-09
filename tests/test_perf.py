@@ -163,11 +163,13 @@ def test_ost_rw_check_uses_configured_threads_and_one_file_per_thread(tmp_path):
         assert "--direct" in cmd
     assert "-w" in elbencho_cmds[0]
     assert "--sync" in elbencho_cmds[0]  # fsync before exiting the write pass
+    assert "--trunc" in elbencho_cmds[0]  # truncate stale leftover files to the target size
     assert "-r" in elbencho_cmds[1]
     assert "-w" not in elbencho_cmds[1]
     assert "--sync" not in elbencho_cmds[1]
+    assert "--trunc" not in elbencho_cmds[1]
     # Both passes target the same set of per-thread scratch file paths.
-    write_paths = [p for p in elbencho_cmds[0][elbencho_cmds[0].index("--csvfile") + 2:] if p != "--sync"]
+    write_paths = [p for p in elbencho_cmds[0][elbencho_cmds[0].index("--csvfile") + 2:] if p not in ("--sync", "--trunc")]
     read_paths = elbencho_cmds[1][elbencho_cmds[1].index("--csvfile") + 2:]
     assert write_paths == read_paths
     assert len(set(write_paths)) == 8
@@ -374,11 +376,13 @@ def test_pool_rw_check_read_reuses_write_pass_scratch_files(tmp_path):
     assert len(elbencho_cmds) == 2
     assert "-w" in elbencho_cmds[0]
     assert "--sync" in elbencho_cmds[0]  # fsync before exiting the write pass
+    assert "--trunc" in elbencho_cmds[0]  # truncate stale leftover files to the target size
     assert "-r" in elbencho_cmds[1]
     assert "-w" not in elbencho_cmds[1]
     assert "--sync" not in elbencho_cmds[1]
+    assert "--trunc" not in elbencho_cmds[1]
     # Both passes target the same scratch file paths.
-    write_paths = [p for p in elbencho_cmds[0][elbencho_cmds[0].index("--csvfile") + 2:] if p != "--sync"]
+    write_paths = [p for p in elbencho_cmds[0][elbencho_cmds[0].index("--csvfile") + 2:] if p not in ("--sync", "--trunc")]
     read_paths = elbencho_cmds[1][elbencho_cmds[1].index("--csvfile") + 2:]
     assert write_paths == read_paths
     assert len(set(write_paths)) == 2
