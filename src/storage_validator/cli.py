@@ -149,7 +149,11 @@ def main(
         ),
     )
 
-    if quiet:
+    if quiet or dry_run:
+        # In dry-run mode, the only output that matters is the
+        # `[DRY RUN] ...` command lines printed by engine.run() itself --
+        # skip the topology/health/perf tables and overall-status line
+        # entirely, since the report they'd describe isn't real data.
         report = engine.run(cfg)
     else:
         console = Console()
