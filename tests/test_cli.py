@@ -51,3 +51,40 @@ def test_cli_prints_console_output_by_default():
     with patch("storage_validator.cli.engine.run", return_value=make_report()):
         result = runner.invoke(main, ["--skip-perf"])
     assert "scratch" in result.output
+
+
+def test_cli_parses_pool_threshold_option():
+    runner = CliRunner()
+    captured = {}
+
+    def fake_run(cfg):
+        captured["cfg"] = cfg
+        return make_report()
+
+    with patch("storage_validator.cli.engine.run", side_effect=fake_run):
+        result = runner.invoke(
+            main,
+            [
+                "--skip-perf",
+                "--quiet",
+                "--pool-threshold",
+                "flash:800:400:2:5",
+                "--pool-threshold",
+                "archive:100:20:20:80",
+            ],
+        )
+    assert result.exit_code == 0
+    thresholds = captured["cfg"].perf.pool_thresholds
+    assert set(thresholds) == {"flash", "archive"}
+    assert thresholds["flash"].warn_mbps == 800.0
+    assert thresholds["flash"].fail_mbps == 400.0
+    assert thresholds["archive"].fail_ms == 80.0
+
+
+def test_cli_rejects_malformed_pool_threshold():
+    runner = CliRunner()
+    with patch("storage_validator.cli.engine.run", return_value=make_report()):
+        result = runner.invoke(
+            main, ["--skip-perf", "--quiet", "--pool-threshold", "flash:bad"]
+        )
+    assert result.exit_code != 0

@@ -38,5 +38,10 @@ class LustreBackend(StorageBackend):
                 )
             ]
         return perf.run_perf_checks(
-            topology, mount_path, size_mb=cfg.size_mb, timeout=cfg.timeout
+            topology,
+            mount_path,
+            size_mb=cfg.size_mb,
+            timeout=cfg.timeout,
+            default_thresholds=cfg.default_thresholds,
+            pool_thresholds=cfg.pool_thresholds,
         )

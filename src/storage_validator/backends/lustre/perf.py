@@ -11,7 +11,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections import defaultdict
 
+from storage_validator.config import PerfThresholds
 from storage_validator.models import PerfResult, Target, Topology
 
 from . import shell
@@ -203,15 +205,107 @@ def latency_check(
             pass
 
 
+def resolve_thresholds(
+    target: Target,
+    default: PerfThresholds,
+    pool_thresholds: dict[str, PerfThresholds] | None,
+) -> PerfThresholds:
+    """Pick the thresholds for `target`: its pool's override if one exists
+    (and the pool has an override configured), else the filesystem default.
+    """
+    if target.pool and pool_thresholds and target.pool in pool_thresholds:
+        return pool_thresholds[target.pool]
+    return default
+
+
+def _aggregate_pool_result(
+    pool_label: str,
+    kind: str,
+    unit: str,
+    values: list[float],
+    warn: float,
+    fail: float,
+    worse_when_higher: bool,
+) -> PerfResult:
+    """Build a pool-level PerfResult from the mean of its per-OST values."""
+    avg = sum(values) / len(values)
+    if worse_when_higher:
+        if avg > fail:
+            status, msg = "FAIL", f"avg {avg:.2f} {unit} above fail threshold {fail}"
+        elif avg > warn:
+            status, msg = "WARN", f"avg {avg:.2f} {unit} above warn threshold {warn}"
+        else:
+            status, msg = "PASS", f"avg {avg:.2f} {unit}"
+    else:
+        if avg < fail:
+            status, msg = "FAIL", f"avg {avg:.1f} {unit} below fail threshold {fail}"
+        elif avg < warn:
+            status, msg = "WARN", f"avg {avg:.1f} {unit} below warn threshold {warn}"
+        else:
+            status, msg = "PASS", f"avg {avg:.1f} {unit}"
+    return PerfResult(
+        target=f"pool:{pool_label}",
+        kind=kind,
+        value=avg,
+        unit=unit,
+        status=status,
+        message=msg,
+        pool=pool_label if pool_label != "(unpooled)" else None,
+        scope="pool",
+    )
+
+
 def run_perf_checks(
     topology: Topology,
     mount_path: str,
     size_mb: int = DEFAULT_SIZE_MB,
     timeout: float = 60,
+    default_thresholds: PerfThresholds | None = None,
+    pool_thresholds: dict[str, PerfThresholds] | None = None,
 ) -> list[PerfResult]:
-    """Run throughput + latency checks against every OST in the topology."""
+    """Run throughput + latency checks against every OST in the topology,
+    then add one aggregate throughput+latency PerfResult per OST pool (plus
+    one for any OSTs that aren't in a pool), using each pool's own
+    thresholds so different drive types (e.g. ssd vs hdd pools) aren't
+    judged against the same bar.
+    """
+    default_thresholds = default_thresholds or PerfThresholds()
     results: list[PerfResult] = []
+    by_pool: dict[str, list[PerfResult]] = defaultdict(list)
     for target in topology.osts:
-        results.append(throughput_check(target, mount_path, size_mb, timeout))
-        results.append(latency_check(target, mount_path, timeout=timeout))
+        th = resolve_thresholds(target, default_thresholds, pool_thresholds)
+        t_result = throughput_check(
+            target, mount_path, size_mb, timeout,
+            warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
+        )
+        l_result = latency_check(
+            target, mount_path, timeout=timeout,
+            warn_ms=th.warn_ms, fail_ms=th.fail_ms,
+        )
+        t_result.pool = target.pool
+        l_result.pool = target.pool
+        results.append(t_result)
+        results.append(l_result)
+        pool_label = target.pool or "(unpooled)"
+        by_pool[pool_label].append(t_result)
+        by_pool[pool_label].append(l_result)
+
+    for pool_label, pool_results in by_pool.items():
+        th = (pool_thresholds or {}).get(pool_label, default_thresholds)
+        throughput_values = [r.value for r in pool_results if r.kind == "throughput"]
+        latency_values = [r.value for r in pool_results if r.kind == "latency"]
+        if throughput_values:
+            results.append(
+                _aggregate_pool_result(
+                    pool_label, "throughput", "MB/s", throughput_values,
+                    th.warn_mbps, th.fail_mbps, worse_when_higher=False,
+                )
+            )
+        if latency_values:
+            results.append(
+                _aggregate_pool_result(
+                    pool_label, "latency", "ms", latency_values,
+                    th.warn_ms, th.fail_ms, worse_when_higher=True,
+                )
+            )
     return results

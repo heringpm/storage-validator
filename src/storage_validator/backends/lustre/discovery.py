@@ -215,9 +215,25 @@ def discover_topology(timeout: float = 30) -> Topology:
                     uuid=target.uuid,
                     state=state,
                 )
+    pools = discover_pools(fsname, timeout=timeout)
+    uuid_to_pool: dict[str, str] = {}
+    for pool in pools:
+        for uuid in pool.osts:
+            uuid_to_pool[uuid] = pool.name
+    for i, target in enumerate(targets):
+        pool_name = uuid_to_pool.get(target.uuid)
+        if pool_name is not None:
+            targets[i] = Target(
+                name=target.name,
+                kind=target.kind,
+                server=target.server,
+                device=target.device,
+                uuid=target.uuid,
+                state=target.state,
+                pool=pool_name,
+            )
     mdts = [t for t in targets if t.kind == "mdt"]
     osts = [t for t in targets if t.kind == "ost"]
-    pools = discover_pools(fsname, timeout=timeout)
     mounts = discover_mounts(timeout=timeout)
     df = discover_df(timeout=timeout)
     return Topology(

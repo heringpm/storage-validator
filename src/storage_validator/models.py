@@ -18,6 +18,7 @@ class Target:
     device: Optional[str] = None
     uuid: Optional[str] = None
     state: Optional[str] = None
+    pool: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -27,6 +28,7 @@ class Target:
             "device": self.device,
             "uuid": self.uuid,
             "state": self.state,
+            "pool": self.pool,
         }
 
 
@@ -85,6 +87,8 @@ class PerfResult:
     unit: str
     status: CheckStatus
     message: str = ""
+    pool: Optional[str] = None
+    scope: Literal["ost", "pool"] = "ost"
 
     def to_dict(self) -> dict:
         return {
@@ -94,6 +98,8 @@ class PerfResult:
             "unit": self.unit,
             "status": self.status,
             "message": self.message,
+            "pool": self.pool,
+            "scope": self.scope,
         }
 
 

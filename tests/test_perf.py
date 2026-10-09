@@ -116,4 +116,70 @@ def test_run_perf_checks_runs_both_per_ost(tmp_path):
         results = perf.run_perf_checks(topo, str(tmp_path))
     kinds = {r.kind for r in results}
     assert kinds == {"throughput", "latency"}
-    assert len(results) == 2
+    # 2 per-OST results + 2 pool-level aggregate results (1 pool: unpooled)
+    assert len(results) == 4
+    pool_results = [r for r in results if r.scope == "pool"]
+    assert len(pool_results) == 2
+    assert {r.target for r in pool_results} == {"pool:(unpooled)"}
+
+
+def test_run_perf_checks_aggregates_per_pool_with_custom_thresholds(tmp_path):
+    from storage_validator.config import PerfThresholds
+    from storage_validator.models import Topology
+
+    flash = Target(name="scratch-OST0000", kind="ost", uuid="u0", pool="flash")
+    archive = Target(name="scratch-OST0001", kind="ost", uuid="u1", pool="archive")
+    topo = Topology(fsname="scratch", osts=[flash, archive])
+
+    # flash: fast (900 MB/s, fast latency); archive: slow (60 MB/s)
+    flash_dd = "bytes copied, 1.0 s, 900 MB/s"
+    archive_dd = "bytes copied, 1.0 s, 60 MB/s"
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=[
+            _ok(), shell_result(0, "", flash_dd),   # flash throughput
+            _ok(), shell_result(0, "", flash_dd),   # flash latency
+            _ok(), shell_result(0, "", archive_dd),  # archive throughput
+            _ok(), shell_result(0, "", archive_dd),  # archive latency
+        ],
+    ), patch("os.remove"):
+        results = perf.run_perf_checks(
+            topo,
+            str(tmp_path),
+            default_thresholds=PerfThresholds(
+                warn_mbps=200, fail_mbps=50, warn_ms=10, fail_ms=50
+            ),
+            pool_thresholds={
+                "archive": PerfThresholds(
+                    warn_mbps=70, fail_mbps=30, warn_ms=50, fail_ms=200
+                )
+            },
+        )
+
+    archive_throughput = next(
+        r for r in results if r.target == "scratch-OST0001" and r.kind == "throughput"
+    )
+    # 60 MB/s is below the default warn (200) but within archive's custom
+    # warn threshold (70 is warn, 30 is fail) -> WARN not FAIL.
+    assert archive_throughput.status == "WARN"
+
+    pool_throughput = {
+        r.pool: r for r in results if r.scope == "pool" and r.kind == "throughput"
+    }
+    assert set(pool_throughput) == {"flash", "archive"}
+    assert pool_throughput["flash"].status == "PASS"
+    assert pool_throughput["archive"].status == "WARN"
+
+
+def test_resolve_thresholds_falls_back_to_default():
+    from storage_validator.config import PerfThresholds
+
+    default = PerfThresholds(warn_mbps=1, fail_mbps=1, warn_ms=1, fail_ms=1)
+    custom = {"flash": PerfThresholds(warn_mbps=2, fail_mbps=2, warn_ms=2, fail_ms=2)}
+    no_pool_target = Target(name="scratch-OST0000", kind="ost")
+    archive_target = Target(name="scratch-OST0001", kind="ost", pool="archive")
+    flash_target = Target(name="scratch-OST0002", kind="ost", pool="flash")
+
+    assert perf.resolve_thresholds(no_pool_target, default, custom) is default
+    assert perf.resolve_thresholds(archive_target, default, custom) is default
+    assert perf.resolve_thresholds(flash_target, default, custom) is custom["flash"]

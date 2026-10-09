@@ -7,11 +7,33 @@ import sys
 import click
 
 from storage_validator import engine
-from storage_validator.config import Config, HealthConfig, PerfConfig
+from storage_validator.config import Config, HealthConfig, PerfConfig, PerfThresholds
 from storage_validator.report import console as console_report
 from storage_validator.report import json_report
 
 _EXIT_CODE = {"PASS": 0, "WARN": 1, "FAIL": 2}
+
+
+def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
+    """Parse `--pool-threshold` values of the form
+    `name:warn_mbps:fail_mbps:warn_ms:fail_ms`.
+    """
+    parts = raw.split(":")
+    if len(parts) != 5:
+        raise click.BadParameter(
+            f"{raw!r}: expected format name:warn_mbps:fail_mbps:warn_ms:fail_ms"
+        )
+    name, warn_mbps, fail_mbps, warn_ms, fail_ms = parts
+    try:
+        thresholds = PerfThresholds(
+            warn_mbps=float(warn_mbps),
+            fail_mbps=float(fail_mbps),
+            warn_ms=float(warn_ms),
+            fail_ms=float(fail_ms),
+        )
+    except ValueError as exc:
+        raise click.BadParameter(f"{raw!r}: {exc}") from exc
+    return name, thresholds
 
 
 @click.command()
@@ -26,6 +48,17 @@ _EXIT_CODE = {"PASS": 0, "WARN": 1, "FAIL": 2}
 @click.option("--warn-ms", default=10.0, show_default=True, help="Write latency (ms) above which to WARN.")
 @click.option("--fail-ms", default=50.0, show_default=True, help="Write latency (ms) above which to FAIL.")
 @click.option("--skip-perf", is_flag=True, default=False, help="Skip throughput/latency perf checks.")
+@click.option(
+    "--pool-threshold",
+    "pool_thresholds",
+    multiple=True,
+    metavar="NAME:WARN_MBPS:FAIL_MBPS:WARN_MS:FAIL_MS",
+    help=(
+        "Per-pool perf thresholds, overriding --warn-mbps/--fail-mbps/--warn-ms/"
+        "--fail-ms for OSTs in that Lustre OST pool (e.g. for mixed drive types "
+        "like flash vs. archive). Repeatable."
+    ),
+)
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress the console table output.")
 def main(
@@ -40,10 +73,12 @@ def main(
     warn_ms: float,
     fail_ms: float,
     skip_perf: bool,
+    pool_thresholds: tuple[str, ...],
     json_path: str | None,
     quiet: bool,
 ) -> None:
     """Validate a storage filesystem: discovery, health checks, perf checks."""
+    parsed_pool_thresholds = dict(_parse_pool_threshold(raw) for raw in pool_thresholds)
     cfg = Config(
         backend=backend,
         skip_perf=skip_perf,
@@ -56,6 +91,7 @@ def main(
             fail_mbps=fail_mbps,
             warn_ms=warn_ms,
             fail_ms=fail_ms,
+            pool_thresholds=parsed_pool_thresholds,
         ),
     )
 
