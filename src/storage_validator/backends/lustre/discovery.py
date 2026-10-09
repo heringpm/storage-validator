@@ -39,6 +39,16 @@ _DL_CLIENT_FSNAME_RE = re.compile(
     r"^\s*\d+\s+\S+\s+(?:lov|lmv)\s+(?P<name>\S+)\s+\S+\s+\d+\s*$"
 )
 
+# Known `lctl dl` device types that aren't MDTs/OSTs (or their client-side
+# mdc/osc/lov/lmv counterparts) and so carry no target info for us to parse
+# -- e.g. "  0 UP mgc MGC172.16.130.90@o2ib ... 4" (the management client
+# connection). Lines with these types are silently skipped in
+# `discover_targets` instead of logging a "skipping unparsed" warning, since
+# they're recognized/expected, not garbage.
+_DL_KNOWN_NON_TARGET_RE = re.compile(
+    r"^\s*\d+\s+\S+\s+(?:mgc|mgs|lov|lmv)\s+\S+\s+\S+\s+\d+\s*$"
+)
+
 # e.g. "0: scratch-OST0000_UUID ACTIVE"
 _OSTS_LINE_RE = re.compile(r"^\d+:\s+(?P<uuid>\S+)\s+(?P<state>\S+)\s*$")
 
@@ -117,6 +127,8 @@ def discover_targets(timeout: float = 30) -> list[Target]:
                     uuid=f"{name}_UUID",
                     state=match.group("state"),
                 )
+            continue
+        if _DL_KNOWN_NON_TARGET_RE.match(line):
             continue
         if line.strip():
             log.warning("skipping unparsed `lctl dl` line: %r", line)
