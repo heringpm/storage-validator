@@ -223,7 +223,7 @@ def latency_check(
         result = shell.run_cmd(
             [
                 elbencho_path, "-w", "-t", str(threads), "-b", "4k",
-                "-s", "4k", "--direct",
+                "-s", f"{threads * 4}k", "--direct",
                 "--csvfile", csv_path, path,
             ],
             timeout=timeout,
@@ -451,7 +451,9 @@ def pool_latency_check(
     Each OST gets its own scratch file (same per-OST striping as
     `pool_throughput_check`), and `elbencho` issues small 4K direct writes
     per OST concurrently (`threads_per_ost` worker threads per file,
-    defaulting to the host's total CPU thread count; `-b 4k -s 4k`). The
+    defaulting to the host's total CPU thread count; `-b 4k`, with the file
+    size per OST scaled to `threads_per_ost * 4k` so every thread has a
+    block to write). The
     reported max IO latency ("IO lat us [max]") across all worker threads is
     used as the pool's latency, since that tail latency is what a client
     actually experiences when an I/O touches every stripe of a wide file.
@@ -478,7 +480,7 @@ def pool_latency_check(
         result = shell.run_cmd(
             [
                 elbencho_path, "-w", "-t", str(total_threads), "-b", "4k",
-                "-s", "4k", "--direct",
+                "-s", f"{threads_per_ost * 4}k", "--direct",
                 "--csvfile", csv_path,
             ] + paths,
             timeout=timeout,

@@ -80,6 +80,10 @@ match an expected client concurrency, or to avoid oversubscribing the host):
 storage-validator --perf-threads 4
 ```
 
+The latency checks' scratch file size is scaled to the thread count (4K per
+thread) so every elbencho worker always has at least one 4K block of its own
+to write, regardless of how many threads are in use.
+
 Point perf checks at a specific client mount (autodetected from `/proc/mounts`
 otherwise):
 
