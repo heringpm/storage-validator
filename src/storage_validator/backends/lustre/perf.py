@@ -17,13 +17,14 @@ root of the mount, laid out as:
 Each of these directories is single-`lfs setstripe`'d *once*, as a
 directory, rather than striping every scratch file individually: an OST's
 directory is striped onto just that one OST, and a pool's directory is
-striped across the whole pool (`-p <pool> -c -1`, or `-c -1` for the
-unpooled default). Every file created inside a directory automatically
-inherits its layout, so individual scratch files need no per-file
-`setstripe` call -- and the pool directory gets Lustre's own real
-round-robin allocation across the pool's OSTs instead of us manually
-assigning files to OSTs. If a target has no pool, its directory lives under
-the filesystem name instead (there's no real pool to scope it to).
+single-striped onto the pool (`-p <pool> -c 1`, or `-c 1` for the unpooled
+default). Every file created inside a directory automatically inherits its
+layout, so individual scratch files need no per-file `setstripe` call --
+and each file in the pool directory lands on exactly one OST, with
+Lustre's own real round-robin allocator spreading different files across
+the pool's OSTs instead of us manually assigning files to OSTs. If a
+target has no pool, its directory lives under the filesystem name instead
+(there's no real pool to scope it to).
 
 Every worker thread gets its own dedicated scratch file inside the relevant
 directory, created and named automatically by elbencho itself (`--dirs 0
@@ -641,13 +642,14 @@ def pool_rw_check(
     `(write_throughput, write_latency, read_throughput, read_latency)`.
 
     All scratch files live inside the pool's persistent scratch directory
-    (see `pool_scratch_dir`), which is itself striped across the whole pool
-    (`lfs setstripe -p <pool> -c -1`, or `-c -1` for the unpooled default)
-    -- so files created inside it get Lustre's own real round-robin
-    allocation across every OST in the pool, instead of us manually
-    assigning individual files to specific OSTs. This is what makes it a
-    genuine pool-level perf test rather than a simulated one. Each of the
-    `threads` worker threads gets its own dedicated scratch file in that
+    (see `pool_scratch_dir`), which is itself single-striped onto the pool
+    (`lfs setstripe -p <pool> -c 1`, or `-c 1` for the unpooled default) --
+    so each file created inside it lands on exactly one OST, with Lustre's
+    own real round-robin allocator spreading different files across every
+    OST in the pool, instead of us manually assigning individual files to
+    specific OSTs. This is what makes it a genuine pool-level perf test
+    rather than a simulated one. Each of the `threads` worker threads gets
+    its own dedicated scratch file in that
     directory. The write pass's data is reused for the read pass, and the
     scratch files (but not the directory itself, which is reused across
     runs) are only removed once both passes have completed.
@@ -671,7 +673,7 @@ def pool_rw_check(
     stripe_count = len(indices)
     pool_dir = pool_scratch_dir(mount_path, fsname, pool_label)
     stripe_args = (
-        ["-p", pool_label, "-c", "-1"] if pool_label != "(unpooled)" else ["-c", "-1"]
+        ["-p", pool_label, "-c", "1"] if pool_label != "(unpooled)" else ["-c", "1"]
     )
     err = _ensure_striped_dir(pool_dir, stripe_args, timeout)
     if err:

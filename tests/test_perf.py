@@ -383,10 +383,11 @@ def test_pool_rw_check_stripes_shared_dir_across_osts(tmp_path):
         )
 
     setstripe_cmds = [c for c in captured_cmds if c[0] == "lfs"]
-    # Only the pool's shared scratch directory is striped once (across all
-    # OSTs via `-c -1`), not per file -- files inside inherit the layout.
+    # Only the pool's shared scratch directory is striped once (single-
+    # striped via `-c 1`), not per file -- files inside inherit the layout,
+    # and Lustre's round-robin allocator spreads files across the pool.
     assert len(setstripe_cmds) == 1
-    assert "-c" in setstripe_cmds[0] and "-1" in setstripe_cmds[0]
+    assert setstripe_cmds[0][setstripe_cmds[0].index("-c") + 1] == "1"
     elbencho_cmds = [c for c in captured_cmds if "elbencho" in c[0]]
     assert len(elbencho_cmds) == 2  # one write pass, one read pass
     for cmd in elbencho_cmds:
