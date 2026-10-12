@@ -320,6 +320,38 @@ def test_run_perf_checks_ost_names_filters_per_ost_checks_only(tmp_path):
     assert {r.target for r in pool_results} == {"pool:flash"}
 
 
+def test_run_perf_checks_only_passes_hosts_to_pool_check_not_ost_check(tmp_path):
+    """`--hosts` must never reach per-OST checks (it would overload a single
+    OST's queue with threads * len(hosts) concurrent requests); it should
+    only be applied to the per-pool aggregate check.
+    """
+    from storage_validator.models import Topology
+
+    ost0 = Target(name="scratch-OST0000", kind="ost", pool="flash")
+    topo = Topology(fsname="scratch", osts=[ost0])
+    captured_cmds = []
+
+    def fake_run_cmd(args, timeout=30):
+        captured_cmds.append(args)
+        if args[0] == "lfs":
+            return shell_result(0, "", "")
+        if args[0] == "ssh":
+            return shell_result(0, "", "")
+        return _fake_elbencho_run_cmd()(args, timeout=timeout)
+
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"), patch("os.listdir", return_value=[]):
+        perf.run_perf_checks(topo, str(tmp_path), threads=4, hosts=["c217", "c218"])
+
+    elbencho_cmds = [c for c in captured_cmds if "elbencho" in c[0]]
+    ost_cmds = [c for c in elbencho_cmds if "scratch-OST0000" in c[-1]]
+    pool_cmds = [c for c in elbencho_cmds if "pool" in c[-1]]
+    assert ost_cmds and all("--hosts" not in c for c in ost_cmds)
+    assert pool_cmds and all("--hosts" in c for c in pool_cmds)
+
+
 def test_run_perf_checks_pool_names_filters_per_ost_and_per_pool_checks(tmp_path):
     from storage_validator.models import Topology
 

@@ -111,12 +111,14 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
     metavar="HOST1,HOST2,...",
     help=(
         "Comma-separated list of hosts (reachable via passwordless SSH) to "
-        "run elbencho on in distributed mode, for maxing out throughput "
-        "beyond one client. An elbencho daemon is started on each host "
-        "before testing and stopped afterwards. Threads apply per host, so "
-        "throughput scales with the number of hosts. Include this client's "
-        "own hostname in the list to have it participate too, alongside "
-        "the other hosts."
+        "run elbencho on in distributed mode. Used only for the per-pool "
+        "aggregate check, not per-OST checks (spreading a single OST's test "
+        "across many clients would overload its queue instead of giving a "
+        "real per-OST measurement). An elbencho daemon is started on each "
+        "host before testing and stopped afterwards. Threads apply per "
+        "host, so pool throughput scales with the number of hosts. Include "
+        "this client's own hostname in the list to have it participate "
+        "too, alongside the other hosts."
     ),
 )
 @click.option(

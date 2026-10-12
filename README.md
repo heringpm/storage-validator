@@ -175,7 +175,7 @@ The process exit code reflects the overall report status: `0` = PASS,
 | `--perf-threads INTEGER` | detected CPU thread count | Total elbencho worker thread count for a single perf test run (per-OST or per-pool). |
 | `--ost NAME` | none | Restrict per-OST perf checks to this OST name (e.g. `scratch-OST0000`). Repeatable. Per-pool checks are unaffected. |
 | `--pool NAME` | none | Restrict perf checks (both per-OST and per-pool) to this OST pool name. Repeatable. |
-| `--hosts HOST1,HOST2,...` | none | Comma-separated list of hosts (reachable via passwordless SSH) to run elbencho on in distributed mode. Threads apply per host, so throughput scales with the number of hosts. Include this client's own hostname to have it participate too. |
+| `--hosts HOST1,HOST2,...` | none | Comma-separated list of hosts (reachable via passwordless SSH) to run elbencho on in distributed mode. Used only by the per-pool aggregate check, not per-OST checks (distributing a single OST's test across many clients would overload its queue instead of giving a real per-OST measurement). Threads apply per host, so pool throughput scales with the number of hosts. Include this client's own hostname to have it participate too. |
 | `--hosts-file FILE` | none | Path to a file with one hostname per line, added to `--hosts`. |
 | `--oss-hosts HOST1,HOST2,...` | none | Comma-separated list of OSS/server hosts (reachable via passwordless SSH) whose page cache is dropped between each check's write and read passes, so read results measure real disk I/O instead of data served back out of server-side RAM (ZFS ARC / page cache). |
 | `--oss-hosts-file FILE` | none | Path to a file with one OSS hostname per line, added to `--oss-hosts`. |

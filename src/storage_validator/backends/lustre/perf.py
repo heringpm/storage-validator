@@ -850,17 +850,22 @@ def run_perf_checks(
 
     If `hosts` is given (a list of hostnames/IPs reachable via passwordless
     SSH), an `elbencho --service` instance is started on each host before
-    any checks run (and stopped again afterwards, even if a check fails), and every
-    `elbencho` invocation runs in distributed mode across all of them at
-    once (`--hosts h1,h2,...`) -- so each check measures combined
-    throughput from every host hitting the filesystem simultaneously,
-    instead of just the local client. elbencho applies `threads` *per*
-    listed host, so throughput scales with the number of hosts (e.g.
-    `threads=24` with 2 hosts runs 48 threads total). If an entry in
+    any checks run (and stopped again afterwards, even if a check fails).
+    It is used **only by the per-pool aggregate check**, not by per-OST
+    checks: every pool check's `elbencho` invocation runs in distributed
+    mode across all of `hosts` at once (`--hosts h1,h2,...`), so it
+    measures the pool's combined throughput under simultaneous multi-client
+    load. Per-OST checks always run from the local client only (`hosts`
+    is not passed to them), since distributing a single OST's test across
+    many clients doesn't better characterize that one OST -- elbencho
+    applies `threads` *per* listed host, so doing this would overload the
+    one OST's queue with `threads * len(hosts)` concurrent requests,
+    producing inflated latency from contention rather than a real,
+    repeatable measurement of that OST's own performance. If an entry in
     `hosts` is this local machine's own hostname (see `normalize_hosts`),
     the elbencho service for it is started locally instead of over SSH, so
-    the local client keeps participating instead of being replaced by the
-    remote hosts.
+    the local client keeps participating in the pool check instead of
+    being replaced by the remote hosts.
 
     If `oss_hosts` is given (a list of OSS/server hostnames reachable via
     passwordless SSH), their page cache is dropped between each check's
@@ -909,7 +914,16 @@ def run_perf_checks(
                 target, mount_path, topology.fsname, size, block_size, runtime, timeout,
                 warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
                 warn_ms=th.warn_ms, fail_ms=th.fail_ms,
-                elbencho_path=elbencho_path, threads=threads, hosts=hosts, oss_hosts=oss_hosts,
+                # Per-OST checks intentionally never use `--hosts`: distributing
+                # a single OST's test across many clients doesn't better
+                # characterize that one OST, it just multiplies the thread
+                # count hitting it (elbencho applies `threads` per host),
+                # overloading its queue and producing inflated latency that
+                # reflects contention, not the drive. `--hosts` is reserved
+                # for the per-pool aggregate check below, where spreading
+                # load across multiple OSTs *and* multiple clients models
+                # realistic concurrent multi-client access.
+                elbencho_path=elbencho_path, threads=threads, hosts=None, oss_hosts=oss_hosts,
                 stripe_count=stripe_count, stripe_size=stripe_size, results_dir=results_dir,
             )
             for result in quad:
