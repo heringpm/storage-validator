@@ -93,6 +93,10 @@ class PerfResult:
     # run (throughput and latency for a given run are both derived from that
     # one run's CSV output, not from separate tests).
     io_mode: Literal["read", "write"] = "write"
+    # For kind="latency", the average latency (ms) alongside `value`, which
+    # is the max latency used for PASS/WARN/FAIL status. None for
+    # kind="throughput", or if not computed.
+    avg_value: Optional[float] = None
 
     def to_dict(self) -> dict:
         return {
@@ -105,6 +109,7 @@ class PerfResult:
             "pool": self.pool,
             "scope": self.scope,
             "io_mode": self.io_mode,
+            "avg_value": self.avg_value,
         }
 
 

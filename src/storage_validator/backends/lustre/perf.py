@@ -391,10 +391,11 @@ def _run_elbencho_rw(
     hosts: list[str] | None = None,
     results_dir: str | None = None,
     result_label: str = "result",
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     """Run one elbencho read or write pass against `directory` with a total
     of `threads` worker threads per participating host, and return
-    `(throughput_mibs, latency_us)` parsed from its CSV output.
+    `(throughput_mibs, latency_max_us, latency_avg_us)` parsed from its CSV
+    output.
 
     `--dirs 0 --files 1` tells elbencho to create exactly one file per
     thread directly inside `directory` (not in per-thread subdirs), with
@@ -449,7 +450,7 @@ def _run_elbencho_rw(
             os.remove(csv_path)
         except OSError:
             pass
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     # `timeout` is the generic subprocess timeout used for quick lfs/lctl
     # calls elsewhere; it's unrelated to elbencho's own `--timelimit
     # runtime`. elbencho needs at least `runtime` seconds to run its test
@@ -471,7 +472,13 @@ def _run_elbencho_rw(
                 f"parsed row: {row!r}"
             )
         try:
-            return float(row["MiB/s [last]"]), float(row["IO lat us [max]"])
+            rate = float(row["MiB/s [last]"])
+            lat_max_us = float(row["IO lat us [max]"])
+            # "IO lat us [avg]" may be missing on older elbencho versions;
+            # fall back to the max so avg latency is still populated rather
+            # than silently defaulting to 0.
+            lat_avg_us = float(row["IO lat us [avg]"]) if row.get("IO lat us [avg]") else lat_max_us
+            return rate, lat_max_us, lat_avg_us
         except ValueError as exc:
             raise ElbenchoError(f"could not parse elbencho CSV output: {exc}") from exc
     finally:
@@ -505,7 +512,7 @@ def _fail_quad(
     for mode in ("write", "read"):
         common = dict(target=target_name, status="FAIL", message=message, pool=pool, scope=scope, io_mode=mode)
         results.append(PerfResult(kind="throughput", value=0.0, unit="MB/s", **common))
-        results.append(PerfResult(kind="latency", value=0.0, unit="ms", **common))
+        results.append(PerfResult(kind="latency", value=0.0, unit="ms", avg_value=0.0, **common))
     return tuple(results)
 
 
@@ -521,10 +528,11 @@ def _write_then_read(
     oss_hosts: list[str] | None = None,
     results_dir: str | None = None,
     result_label: str = "result",
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float, float]:
     """Run one write pass against `directory` (one file per worker thread,
     created by elbencho itself), then read that same data back, returning
-    `(write_mibs, write_lat_us, read_mibs, read_lat_us)`.
+    `(write_mibs, write_lat_max_us, write_lat_avg_us, read_mibs,
+    read_lat_max_us, read_lat_avg_us)`.
 
     The write pass's data is reused for the read pass instead of writing it
     twice. If `hosts` is given, both passes run across every host at once
@@ -538,36 +546,52 @@ def _write_then_read(
     If `results_dir` is given, raw elbencho output for both passes is saved
     there (see `_run_elbencho_rw`).
     """
-    write_rate, write_lat_us = _run_elbencho_rw(
+    write_rate, write_lat_max_us, write_lat_avg_us = _run_elbencho_rw(
         directory, "write", threads, size, block_size, runtime, elbencho_path, timeout, hosts,
         results_dir, result_label,
     )
     if oss_hosts:
         drop_oss_caches(oss_hosts, timeout)
-    read_rate, read_lat_us = _run_elbencho_rw(
+    read_rate, read_lat_max_us, read_lat_avg_us = _run_elbencho_rw(
         directory, "read", threads, size, block_size, runtime, elbencho_path, timeout, hosts,
         results_dir, result_label,
     )
-    return write_rate, write_lat_us, read_rate, read_lat_us
+    return (
+        write_rate, write_lat_max_us, write_lat_avg_us,
+        read_rate, read_lat_max_us, read_lat_avg_us,
+    )
 
 
 def _build_results(
     target_name: str,
-    write_rate: float, write_lat_us: float, read_rate: float, read_lat_us: float,
+    write_rate: float, write_lat_max_us: float, read_rate: float, read_lat_max_us: float,
     warn_mbps: float, fail_mbps: float, warn_ms: float, fail_ms: float,
     pool: str | None = None, scope: Literal["ost", "pool"] = "ost",
     detail: str = "",
+    write_lat_avg_us: float = 0.0, read_lat_avg_us: float = 0.0,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     results = []
-    for mode, rate, lat_us in (("write", write_rate, write_lat_us), ("read", read_rate, read_lat_us)):
-        latency_ms = lat_us / 1000.0
+    for mode, rate, lat_max_us, lat_avg_us in (
+        ("write", write_rate, write_lat_max_us, write_lat_avg_us),
+        ("read", read_rate, read_lat_max_us, read_lat_avg_us),
+    ):
+        latency_ms = lat_max_us / 1000.0
+        latency_avg_ms = lat_avg_us / 1000.0
         t_status, t_msg = _classify_throughput(rate, warn_mbps, fail_mbps)
+        # Status/message are based on max latency (the worst-case I/O seen
+        # during the run); average latency is attached alongside purely
+        # informationally, since max latency alone can be misleading about
+        # typical I/O latency.
         l_status, l_msg = _classify_latency(latency_ms, warn_ms, fail_ms)
+        l_msg = f"{l_msg} (avg {latency_avg_ms:.2f} ms)"
         if detail:
             t_msg, l_msg = f"{t_msg} ({detail})", f"{l_msg} ({detail})"
         common = dict(target=target_name, pool=pool, scope=scope, io_mode=mode)
         results.append(PerfResult(kind="throughput", value=rate, unit="MB/s", status=t_status, message=t_msg, **common))
-        results.append(PerfResult(kind="latency", value=latency_ms, unit="ms", status=l_status, message=l_msg, **common))
+        results.append(PerfResult(
+            kind="latency", value=latency_ms, unit="ms", status=l_status, message=l_msg,
+            avg_value=latency_avg_ms, **common,
+        ))
     return tuple(results)
 
 
@@ -638,7 +662,10 @@ def ost_rw_check(
         return _fail_quad(target.name, err)
 
     try:
-        write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
+        (
+            write_rate, write_lat_max_us, write_lat_avg_us,
+            read_rate, read_lat_max_us, read_lat_avg_us,
+        ) = _write_then_read(
             ost_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts, oss_hosts,
             results_dir, target.name,
         )
@@ -648,9 +675,10 @@ def ost_rw_check(
         _clear_scratch_dir(ost_dir)
 
     return _build_results(
-        target.name, write_rate, write_lat_us, read_rate, read_lat_us,
+        target.name, write_rate, write_lat_max_us, read_rate, read_lat_max_us,
         warn_mbps, fail_mbps, warn_ms, fail_ms,
         detail="dry run, no real data" if shell.DRY_RUN else "",
+        write_lat_avg_us=write_lat_avg_us, read_lat_avg_us=read_lat_avg_us,
     )
 
 
@@ -756,7 +784,10 @@ def pool_rw_check(
         return _fail_quad(f"pool:{pool_label}", err, **pool_kwargs)
 
     try:
-        write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
+        (
+            write_rate, write_lat_max_us, write_lat_avg_us,
+            read_rate, read_lat_max_us, read_lat_avg_us,
+        ) = _write_then_read(
             pool_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts, oss_hosts,
             results_dir, f"pool_{pool_label}",
         )
@@ -771,8 +802,9 @@ def pool_rw_check(
     if shell.DRY_RUN:
         detail += ", dry run, no real data"
     return _build_results(
-        f"pool:{pool_label}", write_rate, write_lat_us, read_rate, read_lat_us,
-        warn_mbps, fail_mbps, warn_ms, fail_ms, detail=detail, **pool_kwargs,
+        f"pool:{pool_label}", write_rate, write_lat_max_us, read_rate, read_lat_max_us,
+        warn_mbps, fail_mbps, warn_ms, fail_ms, detail=detail,
+        write_lat_avg_us=write_lat_avg_us, read_lat_avg_us=read_lat_avg_us, **pool_kwargs,
     )
 
 

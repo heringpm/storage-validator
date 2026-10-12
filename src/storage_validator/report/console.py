@@ -77,7 +77,10 @@ def _value_cell(result: PerfResult | None) -> str:
     if result is None:
         return "-"
     style = _STATUS_STYLE.get(result.status, "white")
-    return f"[{style}]{result.value:.2f} {result.unit}[/{style}]"
+    text = f"{result.value:.2f} {result.unit}"
+    if result.avg_value is not None:
+        text += f" (avg {result.avg_value:.2f} {result.unit})"
+    return f"[{style}]{text}[/{style}]"
 
 
 def _add_perf_row(

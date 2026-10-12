@@ -37,6 +37,53 @@ def test_read_elbencho_csv_last_row_skips_sync_row(tmp_path):
     assert row["IO lat us [max]"] == "1000.0"
 
 
+def test_read_elbencho_csv_last_row_includes_avg_latency_column(tmp_path):
+    csv_path = tmp_path / "out.csv"
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.DictWriter(
+            fh, fieldnames=["operation", "MiB/s [last]", "IO lat us [max]", "IO lat us [avg]"]
+        )
+        writer.writeheader()
+        writer.writerow({
+            "operation": "WRITE", "MiB/s [last]": "300.0",
+            "IO lat us [max]": "1000.0", "IO lat us [avg]": "400.0",
+        })
+
+    row = perf._read_elbencho_csv_last_row(str(csv_path), "WRITE")
+    assert row["IO lat us [avg]"] == "400.0"
+
+
+def test_run_perf_checks_populates_avg_latency(tmp_path):
+    from storage_validator.models import Topology
+
+    ost0 = Target(name="scratch-OST0000", kind="ost", uuid="u0")
+    topo = Topology(fsname="scratch", osts=[ost0])
+
+    def fake_run_cmd(args, timeout=30):
+        if args[0] == "lfs":
+            return shell_result(0, "", "")
+        csv_path = args[args.index("--csvfile") + 1]
+        with open(csv_path, "w", newline="") as fh:
+            writer = csv.DictWriter(
+                fh, fieldnames=["MiB/s [last]", "IO lat us [max]", "IO lat us [avg]"]
+            )
+            writer.writeheader()
+            writer.writerow({"MiB/s [last]": 300.0, "IO lat us [max]": 1000.0, "IO lat us [avg]": 400.0})
+        return shell_result(0, "", "")
+
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"):
+        results = perf.run_perf_checks(topo, str(tmp_path), threads=1)
+
+    lat_results = [r for r in results if r.kind == "latency" and r.scope == "ost"]
+    assert len(lat_results) == 2
+    for r in lat_results:
+        assert r.value == 1.0  # max latency in ms
+        assert r.avg_value == 0.4  # avg latency in ms
+
+
 def test_detect_cpu_thread_count_parses_lscpu():
     def fake_run_cmd(args, timeout=30):
         return shell_result(0, "Architecture: x86_64\nCPU(s):  16\nVendor ID: GenuineIntel\n", "")

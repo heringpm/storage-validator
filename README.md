@@ -71,8 +71,11 @@ storage-validator \
 Every check (per-OST and per-pool) allocates one dedicated scratch file per
 worker thread — never a single file shared by all threads — and runs one
 `elbencho` write pass followed by one read pass against that same set of
-files, each pass deriving both its throughput ("MiB/s [last]") and its
-latency ("IO lat us [max]") from its own output. The write pass populates the
+files, each pass deriving its throughput ("MiB/s [last]") and both its max
+("IO lat us [max]") and average ("IO lat us [avg]") latency from its own
+output. Status (PASS/WARN/FAIL) is based on the max latency, since that's
+the worst-case I/O seen during the run; average latency is reported
+alongside it purely for context. The write pass populates the
 files; the read pass reuses that data instead of writing it again, cutting
 total runtime roughly in half compared to writing separately for each
 direction. The write pass uses elbencho's `--sync` flag so each file is
