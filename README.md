@@ -115,6 +115,14 @@ real disk I/O instead of server-side RAM:
 storage-validator --hosts client1,client2 --oss-hosts oss1,oss2
 ```
 
+Override the stripe count and/or stripe size used for perf scratch
+directories (defaults: `-c 1`, i.e. each scratch file single-striped onto
+one OST, and the filesystem's own default stripe size):
+
+```
+storage-validator --stripe-count 4 --stripe-size 4m
+```
+
 Run only the perf checks, skipping health checks and the topology/health
 table:
 
@@ -160,6 +168,8 @@ The process exit code reflects the overall report status: `0` = PASS,
 | `--hosts-file FILE` | none | Path to a file with one hostname per line, added to `--hosts`. |
 | `--oss-hosts HOST1,HOST2,...` | none | Comma-separated list of OSS/server hosts (reachable via passwordless SSH) whose page cache is dropped between each check's write and read passes, so read results measure real disk I/O instead of data served back out of server-side RAM (ZFS ARC / page cache). |
 | `--oss-hosts-file FILE` | none | Path to a file with one OSS hostname per line, added to `--oss-hosts`. |
+| `--stripe-count INTEGER` | `1` | `lfs setstripe -c` override for perf scratch directories (both per-OST and per-pool). Default: each scratch file single-striped onto one OST. |
+| `--stripe-size SIZE` | filesystem default | `lfs setstripe -S` override for perf scratch directories (e.g. `1m`, `4m`). |
 | `--json FILE` | none | Write the JSON report to this path. |
 | `--quiet` | off | Suppress the console table output. |
 | `--help` | — | Show the help message and exit. |

@@ -542,6 +542,8 @@ def ost_rw_check(
     threads: int | None = None,
     hosts: list[str] | None = None,
     oss_hosts: list[str] | None = None,
+    stripe_count: int | None = None,
+    stripe_size: str | None = None,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
     read pass against `target`'s OST, returning
@@ -556,6 +558,11 @@ def ost_rw_check(
     command line. The write pass's data is reused for the read pass, and the
     scratch files (but not the directory itself, which is reused across
     runs) are only removed once both passes have completed.
+
+    `stripe_count` overrides the directory's `lfs setstripe -c` value
+    (default `1`, i.e. pinned onto just `target`'s OST). `stripe_size`, if
+    given, adds an `-S <stripe_size>` (e.g. `1m`, `4m`) instead of leaving
+    it at the filesystem default.
 
     If `hosts` is given, every host runs `threads` worker threads against
     the same shared `ost_dir` at once (see `_run_elbencho_rw`), measuring
@@ -574,7 +581,10 @@ def ost_rw_check(
         )
 
     ost_dir = ost_scratch_dir(mount_path, fsname, target)
-    err = _ensure_striped_dir(ost_dir, ["-i", str(idx), "-c", "1"], timeout)
+    stripe_args = ["-i", str(idx), "-c", str(stripe_count or 1)]
+    if stripe_size:
+        stripe_args += ["-S", stripe_size]
+    err = _ensure_striped_dir(ost_dir, stripe_args, timeout)
     if err:
         return _fail_quad(target.name, err)
 
@@ -636,6 +646,8 @@ def pool_rw_check(
     threads: int | None = None,
     hosts: list[str] | None = None,
     oss_hosts: list[str] | None = None,
+    stripe_count: int | None = None,
+    stripe_size: str | None = None,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
     read pass across every OST in a pool at once, returning
@@ -654,6 +666,12 @@ def pool_rw_check(
     scratch files (but not the directory itself, which is reused across
     runs) are only removed once both passes have completed.
 
+    `stripe_count` overrides the directory's `lfs setstripe -c` value
+    (default `1`, i.e. each file single-striped, with Lustre spreading
+    files round-robin across the pool). `stripe_size`, if given, adds an
+    `-S <stripe_size>` (e.g. `1m`, `4m`) instead of leaving it at the
+    filesystem default.
+
     If `hosts` is given, every host runs `threads` worker threads against
     the shared `pool_dir` at once (see `_run_elbencho_rw`), measuring the
     pool's combined throughput under load from every client at once.
@@ -670,11 +688,15 @@ def pool_rw_check(
         )
 
     threads = threads or detect_cpu_thread_count()
-    stripe_count = len(indices)
+    ost_count = len(indices)
     pool_dir = pool_scratch_dir(mount_path, fsname, pool_label)
     stripe_args = (
-        ["-p", pool_label, "-c", "1"] if pool_label != "(unpooled)" else ["-c", "1"]
+        ["-p", pool_label, "-c", str(stripe_count or 1)]
+        if pool_label != "(unpooled)"
+        else ["-c", str(stripe_count or 1)]
     )
+    if stripe_size:
+        stripe_args += ["-S", stripe_size]
     err = _ensure_striped_dir(pool_dir, stripe_args, timeout)
     if err:
         return _fail_quad(f"pool:{pool_label}", err, **pool_kwargs)
@@ -688,7 +710,7 @@ def pool_rw_check(
     finally:
         _clear_scratch_dir(pool_dir)
 
-    detail = f"{stripe_count} OSTs, {threads} threads total"
+    detail = f"{ost_count} OSTs, {threads} threads total"
     if hosts:
         detail += f", {len(hosts)} hosts"
     if shell.DRY_RUN:
@@ -714,6 +736,8 @@ def run_perf_checks(
     pool_names: set[str] | None = None,
     hosts: list[str] | None = None,
     oss_hosts: list[str] | None = None,
+    stripe_count: int | None = None,
+    stripe_size: str | None = None,
     on_result: Callable[[tuple[PerfResult, PerfResult, PerfResult, PerfResult]], None] | None = None,
 ) -> list[PerfResult]:
     """Run one write+read throughput/latency check against every OST in the
@@ -755,6 +779,11 @@ def run_perf_checks(
     write and read passes (see `drop_oss_caches`), so read results measure
     real disk I/O instead of data served back out of OSS-side RAM.
 
+    `stripe_count` and `stripe_size` override the scratch directories'
+    `lfs setstripe -c`/`-S` values (defaults: `-c 1` and the filesystem's
+    default stripe size) for both per-OST and per-pool checks -- see
+    `ost_rw_check`/`pool_rw_check` for what the defaults mean for each.
+
     If `on_result` is given, it's called with each check's 4-tuple of
     results (write throughput/latency, read throughput/latency) as soon as
     that check finishes, so a caller can stream results instead of waiting
@@ -789,6 +818,7 @@ def run_perf_checks(
                 warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
                 warn_ms=th.warn_ms, fail_ms=th.fail_ms,
                 elbencho_path=elbencho_path, threads=threads, hosts=hosts, oss_hosts=oss_hosts,
+                stripe_count=stripe_count, stripe_size=stripe_size,
             )
             for result in quad:
                 result.pool = target.pool
@@ -810,6 +840,7 @@ def run_perf_checks(
                 warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
                 warn_ms=th.warn_ms, fail_ms=th.fail_ms,
                 elbencho_path=elbencho_path, threads=threads, hosts=hosts, oss_hosts=oss_hosts,
+                stripe_count=stripe_count, stripe_size=stripe_size,
             )
             results.extend(quad)
             if on_result:

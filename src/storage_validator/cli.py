@@ -142,6 +142,25 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
     type=click.Path(dir_okay=False, exists=True),
     help="Path to a file with one OSS hostname per line, added to --oss-hosts.",
 )
+@click.option(
+    "--stripe-count",
+    default=None,
+    type=int,
+    help=(
+        "lfs setstripe -c override for perf scratch directories (both "
+        "per-OST and per-pool). Defaults to 1 (each scratch file "
+        "single-striped onto one OST)."
+    ),
+)
+@click.option(
+    "--stripe-size",
+    default=None,
+    metavar="SIZE",
+    help=(
+        "lfs setstripe -S override for perf scratch directories (e.g. "
+        "1m, 4m). Defaults to the filesystem's own default stripe size."
+    ),
+)
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress the console table output.")
 def main(
@@ -169,6 +188,8 @@ def main(
     hosts_file: str | None,
     oss_hosts: str | None,
     oss_hosts_file: str | None,
+    stripe_count: int | None,
+    stripe_size: str | None,
     json_path: str | None,
     quiet: bool,
 ) -> None:
@@ -205,6 +226,8 @@ def main(
             pool_names=set(pool_names) or None,
             hosts=parsed_hosts or None,
             oss_hosts=parsed_oss_hosts or None,
+            stripe_count=stripe_count,
+            stripe_size=stripe_size,
         ),
     )
 

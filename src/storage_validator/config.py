@@ -81,6 +81,13 @@ class PerfConfig:
     # effect on. Populated from `--oss-hosts` (comma-separated) and/or
     # `--oss-hosts-file` (one host per line) on the CLI.
     oss_hosts: Optional[list[str]] = None
+    # `lfs setstripe -c` override for scratch directories (both per-OST and
+    # per-pool). Defaults to None, meaning the built-in default of 1 (each
+    # scratch file single-striped onto one OST).
+    stripe_count: Optional[int] = None
+    # `lfs setstripe -S` override for scratch directories (e.g. "1m", "4m").
+    # Defaults to None, meaning the filesystem's own default stripe size.
+    stripe_size: Optional[str] = None
 
     @property
     def default_thresholds(self) -> PerfThresholds:

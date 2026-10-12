@@ -463,6 +463,67 @@ def test_pool_rw_check_read_reuses_write_pass_scratch_files(tmp_path):
     assert elbencho_cmds[0][-1] == elbencho_cmds[1][-1]
 
 
+def test_ost_rw_check_stripe_count_and_size_override(tmp_path):
+    captured_cmds = []
+
+    def fake_run_cmd(args, timeout=30):
+        captured_cmds.append(args)
+        return _fake_elbencho_run_cmd()(args, timeout=timeout)
+
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"):
+        perf.ost_rw_check(
+            OST0, str(tmp_path), threads=1, stripe_count=4, stripe_size="4m"
+        )
+
+    setstripe_cmd = next(c for c in captured_cmds if c[0] == "lfs")
+    assert setstripe_cmd[setstripe_cmd.index("-c") + 1] == "4"
+    assert setstripe_cmd[setstripe_cmd.index("-S") + 1] == "4m"
+
+
+def test_ost_rw_check_defaults_stripe_count_to_one_and_omits_stripe_size(tmp_path):
+    captured_cmds = []
+
+    def fake_run_cmd(args, timeout=30):
+        captured_cmds.append(args)
+        return _fake_elbencho_run_cmd()(args, timeout=timeout)
+
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"):
+        perf.ost_rw_check(OST0, str(tmp_path), threads=1)
+
+    setstripe_cmd = next(c for c in captured_cmds if c[0] == "lfs")
+    assert setstripe_cmd[setstripe_cmd.index("-c") + 1] == "1"
+    assert "-S" not in setstripe_cmd
+
+
+def test_pool_rw_check_stripe_count_and_size_override(tmp_path):
+    captured_cmds = []
+
+    def fake_run_cmd(args, timeout=30):
+        captured_cmds.append(args)
+        return _fake_elbencho_run_cmd()(args, timeout=timeout)
+
+    ost0 = Target(name="scratch-OST0000", kind="ost")
+    ost1 = Target(name="scratch-OST0001", kind="ost")
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=fake_run_cmd,
+    ), patch("os.remove"):
+        perf.pool_rw_check(
+            "flash", [ost0, ost1], str(tmp_path), threads=2,
+            stripe_count=2, stripe_size="1m",
+        )
+
+    setstripe_cmd = next(c for c in captured_cmds if c[0] == "lfs")
+    assert setstripe_cmd[setstripe_cmd.index("-c") + 1] == "2"
+    assert setstripe_cmd[setstripe_cmd.index("-S") + 1] == "1m"
+
+
 def test_resolve_thresholds_falls_back_to_default():
     from storage_validator.config import PerfThresholds
 
