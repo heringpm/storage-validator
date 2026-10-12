@@ -1,8 +1,6 @@
 import csv
 from unittest.mock import patch
 
-import pytest
-
 from storage_validator.backends.lustre import perf
 from storage_validator.models import Target
 
@@ -134,11 +132,11 @@ def test_ost_rw_check_pass(tmp_path):
     ), patch("os.remove"):
         wt, wl, rt, rl = perf.ost_rw_check(OST0, str(tmp_path), threads=1)
     assert wt.status == "PASS"
-    assert wt.value == pytest.approx(300.0 * 1024 * 1024 / 1_000_000)
+    assert wt.value == 300.0
     assert wl.value == 1.0
     assert wt.io_mode == "write"
     assert rt.io_mode == "read"
-    assert rt.value == pytest.approx(300.0 * 1024 * 1024 / 1_000_000)
+    assert rt.value == 300.0
 
 
 def test_ost_rw_check_warn(tmp_path):
@@ -474,9 +472,9 @@ def test_pool_rw_check_stripes_shared_dir_across_osts(tmp_path):
     for cmd in elbencho_cmds:
         assert cmd[cmd.index("-t") + 1] == "4"
     assert wt.status == "PASS"
-    assert wt.value == pytest.approx(300.0 * 1024 * 1024 / 1_000_000)
+    assert wt.value == 300.0
     assert rt.io_mode == "read"
-    assert rt.value == pytest.approx(300.0 * 1024 * 1024 / 1_000_000)
+    assert rt.value == 300.0
 
 
 def test_pool_rw_check_elbencho_failure(tmp_path):

@@ -59,7 +59,7 @@ per-OST checks and the per-pool checks use
 with Direct I/O (`--direct`). In addition to the per-OST checks,
 each pool gets a real multi-threaded aggregate test: one scratch file is
 single-striped onto each OST in the pool, then elbencho drives all of them
-concurrently, measuring true aggregate MB/s and worst-case tail latency across
+concurrently, measuring true aggregate MiB/s and worst-case tail latency across
 the pool — not an average of the independent per-OST results:
 
 ```
@@ -163,8 +163,8 @@ The process exit code reflects the overall report status: `0` = PASS,
 | `--timeout FLOAT` | `90.0` | Timeout (s) for each perf/health subprocess call. |
 | `--warn-pct INTEGER` | `80` | OST/MDT usage % that triggers a WARN. |
 | `--fail-pct INTEGER` | `95` | OST/MDT usage % that triggers a FAIL. |
-| `--warn-mbps FLOAT` | `200.0` | Throughput (MB/s) below which to WARN. |
-| `--fail-mbps FLOAT` | `50.0` | Throughput (MB/s) below which to FAIL. |
+| `--warn-mbps FLOAT` | `200.0` | Throughput (MiB/s) below which to WARN. |
+| `--fail-mbps FLOAT` | `50.0` | Throughput (MiB/s) below which to FAIL. |
 | `--warn-ms FLOAT` | `10.0` | Write latency (ms) above which to WARN. |
 | `--fail-ms FLOAT` | `50.0` | Write latency (ms) above which to FAIL. |
 | `--skip-perf` | off | Skip throughput/latency perf checks. |

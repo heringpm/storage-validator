@@ -9,10 +9,9 @@ separate latency-only test, and the write pass's data is reused for the
 read pass instead of writing it twice.
 
 elbencho's "MiB/s [last]" is binary mebibytes/sec (1 MiB = 1,048,576
-bytes), but results are reported here as decimal "MB/s" (1 MB =
-1,000,000 bytes) to match how storage dashboards/vendors typically report
-throughput -- so the raw elbencho number is multiplied by
-1,048,576 / 1,000,000 (~1.048576) before being stored in `PerfResult`.
+bytes). That raw value is used as-is (no conversion to decimal MB/s) and
+labeled "MiB/s" throughout, so the displayed number and unit always match
+what elbencho itself reports.
 
 Scratch files live under a persistent `.storageval/` directory tree at the
 root of the mount, laid out as:
@@ -478,12 +477,9 @@ def _run_elbencho_rw(
                 f"parsed row: {row!r}"
             )
         try:
-            # elbencho reports binary mebibytes/sec (1 MiB = 1,048,576 bytes),
-            # but we display/label this as "MB/s" (decimal megabytes/sec,
-            # 1 MB = 1,000,000 bytes) to match how storage dashboards and
-            # vendors typically report throughput. Convert here so the two
-            # numbers agree, rather than understating throughput by ~4.86%.
-            rate = float(row["MiB/s [last]"]) * (1024.0 * 1024.0 / 1_000_000.0)
+            # elbencho reports binary mebibytes/sec (1 MiB = 1,048,576
+            # bytes); used as-is, no conversion to decimal MB/s.
+            rate = float(row["MiB/s [last]"])
             lat_max_us = float(row["IO lat us [max]"])
             # "IO lat us [avg]" may be missing on older elbencho versions;
             # fall back to the max so avg latency is still populated rather
@@ -501,10 +497,10 @@ def _run_elbencho_rw(
 
 def _classify_throughput(rate: float, warn_mbps: float, fail_mbps: float) -> tuple[str, str]:
     if rate < fail_mbps:
-        return "FAIL", f"{rate:.1f} MB/s below fail threshold {fail_mbps}"
+        return "FAIL", f"{rate:.1f} MiB/s below fail threshold {fail_mbps}"
     if rate < warn_mbps:
-        return "WARN", f"{rate:.1f} MB/s below warn threshold {warn_mbps}"
-    return "PASS", f"{rate:.1f} MB/s"
+        return "WARN", f"{rate:.1f} MiB/s below warn threshold {warn_mbps}"
+    return "PASS", f"{rate:.1f} MiB/s"
 
 
 def _classify_latency(latency_ms: float, warn_ms: float, fail_ms: float) -> tuple[str, str]:
@@ -522,7 +518,7 @@ def _fail_quad(
     results = []
     for mode in ("write", "read"):
         common = dict(target=target_name, status="FAIL", message=message, pool=pool, scope=scope, io_mode=mode)
-        results.append(PerfResult(kind="throughput", value=0.0, unit="MB/s", **common))
+        results.append(PerfResult(kind="throughput", value=0.0, unit="MiB/s", **common))
         results.append(PerfResult(kind="latency", value=0.0, unit="ms", avg_value=0.0, **common))
     return tuple(results)
 
@@ -598,7 +594,7 @@ def _build_results(
         if detail:
             t_msg, l_msg = f"{t_msg} ({detail})", f"{l_msg} ({detail})"
         common = dict(target=target_name, pool=pool, scope=scope, io_mode=mode)
-        results.append(PerfResult(kind="throughput", value=rate, unit="MB/s", status=t_status, message=t_msg, **common))
+        results.append(PerfResult(kind="throughput", value=rate, unit="MiB/s", status=t_status, message=t_msg, **common))
         results.append(PerfResult(
             kind="latency", value=latency_ms, unit="ms", status=l_status, message=l_msg,
             avg_value=latency_avg_ms, **common,
