@@ -159,6 +159,7 @@ The process exit code reflects the overall report status: `0` = PASS,
 | `--mount-path TEXT` | autodetected | Client mount point to use for perf checks. |
 | `--size TEXT` | `10g` | Size of each read/write elbencho test's dataset (e.g. `1g`, `500m`, `10g`). |
 | `--block-size TEXT` | `1m` | elbencho I/O block size (e.g. `1m`, `4k`). |
+| `--iodepth INTEGER` | `8` | elbencho `--iodepth`: number of concurrent I/Os each worker thread keeps in flight. |
 | `--timelimit INTEGER` | `60` | elbencho test runtime (s) per read/write run. |
 | `--timeout FLOAT` | `90.0` | Timeout (s) for each perf/health subprocess call. |
 | `--warn-pct INTEGER` | `80` | OST/MDT usage % that triggers a WARN. |

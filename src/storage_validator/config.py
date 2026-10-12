@@ -92,6 +92,10 @@ class PerfConfig:
     # stdout/stderr) for every check's write and read passes into this
     # directory, instead of discarding them.
     results_dir: Optional[str] = None
+    # elbencho `--iodepth`: number of concurrent I/Os each worker thread
+    # keeps in flight (via Linux AIO) instead of issuing one blocking I/O at
+    # a time. Applied to both per-OST and per-pool checks.
+    iodepth: int = 8
 
     @property
     def default_thresholds(self) -> PerfThresholds:

@@ -67,6 +67,7 @@ IoMode = Literal["read", "write"]
 DEFAULT_SIZE = "10g"
 DEFAULT_BLOCK_SIZE = "1m"
 DEFAULT_RUNTIME = 60
+DEFAULT_IODEPTH = 8
 DEFAULT_WARN_MBPS = 200.0
 DEFAULT_FAIL_MBPS = 50.0
 DEFAULT_WARN_MS = 10.0
@@ -396,11 +397,16 @@ def _run_elbencho_rw(
     hosts: list[str] | None = None,
     results_dir: str | None = None,
     result_label: str = "result",
+    iodepth: int = DEFAULT_IODEPTH,
 ) -> tuple[float, float, float]:
     """Run one elbencho read or write pass against `directory` with a total
     of `threads` worker threads per participating host, and return
     `(throughput_mibs, latency_max_us, latency_avg_us)` parsed from its CSV
     output.
+
+    `iodepth` sets elbencho's `--iodepth`, the number of concurrent I/Os
+    each worker thread keeps in flight (via Linux AIO) instead of issuing
+    one blocking I/O at a time. Defaults to `DEFAULT_IODEPTH` (8).
 
     `--dirs 0 --files 1` tells elbencho to create exactly one file per
     thread directly inside `directory` (not in per-thread subdirs), with
@@ -447,6 +453,7 @@ def _run_elbencho_rw(
     cmd = [
         elbencho_path, io_flag, "-t", str(threads), "-b", block_size,
         "-s", size, "--direct", "--lat", "--timelimit", str(runtime),
+        "--iodepth", str(iodepth),
         "--dirs", "0", "--files", "1", "--csvfile", csv_path,
     ] + host_flags + extra_flags + [directory]
     if shell.DRY_RUN:
@@ -535,11 +542,14 @@ def _write_then_read(
     oss_hosts: list[str] | None = None,
     results_dir: str | None = None,
     result_label: str = "result",
+    iodepth: int = DEFAULT_IODEPTH,
 ) -> tuple[float, float, float, float, float, float]:
     """Run one write pass against `directory` (one file per worker thread,
     created by elbencho itself), then read that same data back, returning
     `(write_mibs, write_lat_max_us, write_lat_avg_us, read_mibs,
     read_lat_max_us, read_lat_avg_us)`.
+
+    `iodepth` is passed through to each pass (see `_run_elbencho_rw`).
 
     The write pass's data is reused for the read pass instead of writing it
     twice. If `hosts` is given, both passes run across every host at once
@@ -555,13 +565,13 @@ def _write_then_read(
     """
     write_rate, write_lat_max_us, write_lat_avg_us = _run_elbencho_rw(
         directory, "write", threads, size, block_size, runtime, elbencho_path, timeout, hosts,
-        results_dir, result_label,
+        results_dir, result_label, iodepth,
     )
     if oss_hosts:
         drop_oss_caches(oss_hosts, timeout)
     read_rate, read_lat_max_us, read_lat_avg_us = _run_elbencho_rw(
         directory, "read", threads, size, block_size, runtime, elbencho_path, timeout, hosts,
-        results_dir, result_label,
+        results_dir, result_label, iodepth,
     )
     return (
         write_rate, write_lat_max_us, write_lat_avg_us,
@@ -621,6 +631,7 @@ def ost_rw_check(
     stripe_count: int | None = None,
     stripe_size: str | None = None,
     results_dir: str | None = None,
+    iodepth: int = DEFAULT_IODEPTH,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
     read pass against `target`'s OST, returning
@@ -652,6 +663,9 @@ def ost_rw_check(
 
     If `results_dir` is given, raw elbencho output for both passes is saved
     there as `<target.name>_<write|read>.csv`/`.log`.
+
+    `iodepth` sets elbencho's `--iodepth` (concurrent I/Os in flight per
+    worker thread). Defaults to `DEFAULT_IODEPTH` (8).
     """
     threads = threads or detect_cpu_thread_count()
     idx = ost_index(target)
@@ -674,7 +688,7 @@ def ost_rw_check(
             read_rate, read_lat_max_us, read_lat_avg_us,
         ) = _write_then_read(
             ost_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts, oss_hosts,
-            results_dir, target.name,
+            results_dir, target.name, iodepth,
         )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_quad(target.name, f"elbencho failed: {exc}")
@@ -734,6 +748,7 @@ def pool_rw_check(
     stripe_count: int | None = None,
     stripe_size: str | None = None,
     results_dir: str | None = None,
+    iodepth: int = DEFAULT_IODEPTH,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
     read pass across every OST in a pool at once, returning
@@ -768,6 +783,9 @@ def pool_rw_check(
 
     If `results_dir` is given, raw elbencho output for both passes is saved
     there as `pool_<pool_label>_<write|read>.csv`/`.log`.
+
+    `iodepth` sets elbencho's `--iodepth` (concurrent I/Os in flight per
+    worker thread). Defaults to `DEFAULT_IODEPTH` (8).
     """
     pool_kwargs = dict(pool=pool_label if pool_label != "(unpooled)" else None, scope="pool")
     indices = _group_ost_indices(targets)
@@ -796,7 +814,7 @@ def pool_rw_check(
             read_rate, read_lat_max_us, read_lat_avg_us,
         ) = _write_then_read(
             pool_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts, oss_hosts,
-            results_dir, f"pool_{pool_label}",
+            results_dir, f"pool_{pool_label}", iodepth,
         )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_quad(f"pool:{pool_label}", f"elbencho failed: {exc}", **pool_kwargs)
@@ -833,6 +851,7 @@ def run_perf_checks(
     stripe_count: int | None = None,
     stripe_size: str | None = None,
     results_dir: str | None = None,
+    iodepth: int = DEFAULT_IODEPTH,
     on_result: Callable[[tuple[PerfResult, PerfResult, PerfResult, PerfResult]], None] | None = None,
 ) -> list[PerfResult]:
     """Run one write+read throughput/latency check against every OST in the
@@ -888,6 +907,10 @@ def run_perf_checks(
     file for every check's write and read passes are saved there (see
     `ost_rw_check`/`pool_rw_check`), instead of being discarded.
 
+    `iodepth` sets elbencho's `--iodepth` (concurrent I/Os in flight per
+    worker thread) for both per-OST and per-pool checks. Defaults to
+    `DEFAULT_IODEPTH` (8).
+
     If `on_result` is given, it's called with each check's 4-tuple of
     results (write throughput/latency, read throughput/latency) as soon as
     that check finishes, so a caller can stream results instead of waiting
@@ -932,6 +955,7 @@ def run_perf_checks(
                 # realistic concurrent multi-client access.
                 elbencho_path=elbencho_path, threads=threads, hosts=None, oss_hosts=oss_hosts,
                 stripe_count=stripe_count, stripe_size=stripe_size, results_dir=results_dir,
+                iodepth=iodepth,
             )
             for result in quad:
                 result.pool = target.pool
@@ -954,6 +978,7 @@ def run_perf_checks(
                 warn_ms=th.warn_ms, fail_ms=th.fail_ms,
                 elbencho_path=elbencho_path, threads=threads, hosts=hosts, oss_hosts=oss_hosts,
                 stripe_count=stripe_count, stripe_size=stripe_size, results_dir=results_dir,
+                iodepth=iodepth,
             )
             results.extend(quad)
             if on_result:

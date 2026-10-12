@@ -39,7 +39,7 @@ class LustreBackend(StorageBackend):
                     target="(all)",
                     kind="throughput",
                     value=0.0,
-                    unit="MB/s",
+                    unit="MiB/s",
                     status="FAIL",
                     message="no mount_path configured and no lustre client mount found",
                 )
@@ -62,5 +62,6 @@ class LustreBackend(StorageBackend):
             stripe_count=cfg.stripe_count,
             stripe_size=cfg.stripe_size,
             results_dir=cfg.results_dir,
+            iodepth=cfg.iodepth,
             on_result=on_result,
         )
