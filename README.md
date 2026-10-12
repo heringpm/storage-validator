@@ -123,6 +123,14 @@ one OST, and the filesystem's own default stripe size):
 storage-validator --stripe-count 4 --stripe-size 4m
 ```
 
+Save the raw elbencho CSV output and `.log` files (command line plus
+stdout/stderr) for every check's write and read passes into a results
+directory:
+
+```
+storage-validator --results-dir ./results
+```
+
 Run only the perf checks, skipping health checks and the topology/health
 table:
 
@@ -170,6 +178,7 @@ The process exit code reflects the overall report status: `0` = PASS,
 | `--oss-hosts-file FILE` | none | Path to a file with one OSS hostname per line, added to `--oss-hosts`. |
 | `--stripe-count INTEGER` | `1` | `lfs setstripe -c` override for perf scratch directories (both per-OST and per-pool). Default: each scratch file single-striped onto one OST. |
 | `--stripe-size SIZE` | filesystem default | `lfs setstripe -S` override for perf scratch directories (e.g. `1m`, `4m`). |
+| `--results-dir DIRECTORY` | none | Save raw elbencho CSV output and `.log` files (command line + stdout/stderr) for every check's write and read passes into this directory. |
 | `--json FILE` | none | Write the JSON report to this path. |
 | `--quiet` | off | Suppress the console table output. |
 | `--help` | — | Show the help message and exit. |

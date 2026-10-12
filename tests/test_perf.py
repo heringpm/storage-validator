@@ -524,6 +524,51 @@ def test_pool_rw_check_stripe_count_and_size_override(tmp_path):
     assert setstripe_cmd[setstripe_cmd.index("-S") + 1] == "1m"
 
 
+def test_ost_rw_check_saves_results_to_results_dir(tmp_path):
+    results_dir = tmp_path / "results"
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=_fake_elbencho_run_cmd(rate=300.0, lat_us=1000.0),
+    ), patch("os.remove"):
+        perf.ost_rw_check(
+            OST0, str(tmp_path), threads=1, results_dir=str(results_dir)
+        )
+
+    write_csv = results_dir / f"{OST0.name}_write.csv"
+    read_csv = results_dir / f"{OST0.name}_read.csv"
+    write_log = results_dir / f"{OST0.name}_write.log"
+    read_log = results_dir / f"{OST0.name}_read.log"
+    assert write_csv.exists() and read_csv.exists()
+    assert write_log.exists() and read_log.exists()
+    assert "elbencho" in write_log.read_text()
+
+
+def test_pool_rw_check_saves_results_to_results_dir(tmp_path):
+    results_dir = tmp_path / "results"
+    ost0 = Target(name="scratch-OST0000", kind="ost")
+    ost1 = Target(name="scratch-OST0001", kind="ost")
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=_fake_elbencho_run_cmd(),
+    ), patch("os.remove"):
+        perf.pool_rw_check(
+            "flash", [ost0, ost1], str(tmp_path), threads=2,
+            results_dir=str(results_dir),
+        )
+
+    assert (results_dir / "pool_flash_write.csv").exists()
+    assert (results_dir / "pool_flash_read.csv").exists()
+
+
+def test_ost_rw_check_no_results_dir_by_default(tmp_path):
+    with patch(
+        "storage_validator.backends.lustre.perf.shell.run_cmd",
+        side_effect=_fake_elbencho_run_cmd(),
+    ), patch("os.remove"):
+        perf.ost_rw_check(OST0, str(tmp_path), threads=1)
+    assert not (tmp_path / "results").exists()
+
+
 def test_resolve_thresholds_falls_back_to_default():
     from storage_validator.config import PerfThresholds
 

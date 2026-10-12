@@ -88,6 +88,10 @@ class PerfConfig:
     # `lfs setstripe -S` override for scratch directories (e.g. "1m", "4m").
     # Defaults to None, meaning the filesystem's own default stripe size.
     stripe_size: Optional[str] = None
+    # If set, save raw elbencho CSV output and a .log file (command line +
+    # stdout/stderr) for every check's write and read passes into this
+    # directory, instead of discarding them.
+    results_dir: Optional[str] = None
 
     @property
     def default_thresholds(self) -> PerfThresholds:

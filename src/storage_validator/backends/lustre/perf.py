@@ -351,6 +351,34 @@ def _read_elbencho_csv_last_row(csv_path: str, operation: str) -> dict[str, str]
     return rows[-1] if rows else None
 
 
+def _save_elbencho_output(
+    results_dir: str, result_label: str, mode: IoMode,
+    cmd: list[str], result: shell.CommandResult, csv_path: str,
+) -> None:
+    """Persist the raw elbencho CSV report and a `.log` file (command line
+    plus stdout/stderr) for one read/write pass into `results_dir`, named
+    `<result_label>_<mode>.csv`/`.log`.
+
+    Best-effort: failures to write these artifacts are logged but never
+    raised, so they can't turn a successful benchmark into a failed check.
+    """
+    try:
+        os.makedirs(results_dir, exist_ok=True)
+        base = os.path.join(results_dir, f"{result_label}_{mode}")
+        if os.path.exists(csv_path):
+            with open(csv_path, "rb") as src, open(f"{base}.csv", "wb") as dst:
+                dst.write(src.read())
+        with open(f"{base}.log", "w") as log_fh:
+            log_fh.write("$ " + " ".join(cmd) + "\n\n")
+            log_fh.write("--- stdout ---\n")
+            log_fh.write(result.stdout or "")
+            log_fh.write("\n--- stderr ---\n")
+            log_fh.write(result.stderr or "")
+            log_fh.write("\n")
+    except OSError as exc:
+        log.warning("could not save elbencho output for %s: %s", result_label, exc)
+
+
 def _run_elbencho_rw(
     directory: str,
     mode: IoMode,
@@ -361,6 +389,8 @@ def _run_elbencho_rw(
     elbencho_path: str,
     timeout: float,
     hosts: list[str] | None = None,
+    results_dir: str | None = None,
+    result_label: str = "result",
 ) -> tuple[float, float]:
     """Run one elbencho read or write pass against `directory` with a total
     of `threads` worker threads per participating host, and return
@@ -393,6 +423,12 @@ def _run_elbencho_rw(
     size to use is larger than detected size." (Note: `--trunc` alone
     truncates to *0*, not to `size`, so it doesn't fix this.)
 
+    If `results_dir` is given, the raw elbencho CSV output and a `.log` file
+    (full command line plus stdout/stderr) for this pass are saved there as
+    `<result_label>_<mode>.csv`/`.log` instead of being discarded -- useful
+    for keeping the actual elbencho test output around for later inspection.
+    Not written in dry-run mode, since no real test runs.
+
     Raises `ElbenchoError` if the command fails or its output can't be
     parsed, `shell.CommandError` if the command itself couldn't be run.
     """
@@ -423,6 +459,8 @@ def _run_elbencho_rw(
     elbencho_timeout = max(timeout, runtime + 60)
     try:
         result = shell.run_cmd(cmd, timeout=elbencho_timeout)
+        if results_dir:
+            _save_elbencho_output(results_dir, result_label, mode, cmd, result, csv_path)
         if not result.ok:
             raise ElbenchoError((result.stderr or result.stdout).strip())
 
@@ -481,6 +519,8 @@ def _write_then_read(
     timeout: float,
     hosts: list[str] | None = None,
     oss_hosts: list[str] | None = None,
+    results_dir: str | None = None,
+    result_label: str = "result",
 ) -> tuple[float, float, float, float]:
     """Run one write pass against `directory` (one file per worker thread,
     created by elbencho itself), then read that same data back, returning
@@ -494,14 +534,19 @@ def _write_then_read(
     `drop_oss_caches`) between the write and read passes, so the read pass
     measures real disk I/O instead of data served back out of OSS-side RAM
     (which `--direct` on the client has no effect on).
+
+    If `results_dir` is given, raw elbencho output for both passes is saved
+    there (see `_run_elbencho_rw`).
     """
     write_rate, write_lat_us = _run_elbencho_rw(
-        directory, "write", threads, size, block_size, runtime, elbencho_path, timeout, hosts
+        directory, "write", threads, size, block_size, runtime, elbencho_path, timeout, hosts,
+        results_dir, result_label,
     )
     if oss_hosts:
         drop_oss_caches(oss_hosts, timeout)
     read_rate, read_lat_us = _run_elbencho_rw(
-        directory, "read", threads, size, block_size, runtime, elbencho_path, timeout, hosts
+        directory, "read", threads, size, block_size, runtime, elbencho_path, timeout, hosts,
+        results_dir, result_label,
     )
     return write_rate, write_lat_us, read_rate, read_lat_us
 
@@ -544,6 +589,7 @@ def ost_rw_check(
     oss_hosts: list[str] | None = None,
     stripe_count: int | None = None,
     stripe_size: str | None = None,
+    results_dir: str | None = None,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
     read pass against `target`'s OST, returning
@@ -572,6 +618,9 @@ def ost_rw_check(
     If `oss_hosts` is given, their page cache is dropped between the write
     and read passes (see `drop_oss_caches`), so the read measures real disk
     I/O instead of data served back out of OSS-side RAM.
+
+    If `results_dir` is given, raw elbencho output for both passes is saved
+    there as `<target.name>_<write|read>.csv`/`.log`.
     """
     threads = threads or detect_cpu_thread_count()
     idx = ost_index(target)
@@ -590,7 +639,8 @@ def ost_rw_check(
 
     try:
         write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
-            ost_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts, oss_hosts
+            ost_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts, oss_hosts,
+            results_dir, target.name,
         )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_quad(target.name, f"elbencho failed: {exc}")
@@ -648,6 +698,7 @@ def pool_rw_check(
     oss_hosts: list[str] | None = None,
     stripe_count: int | None = None,
     stripe_size: str | None = None,
+    results_dir: str | None = None,
 ) -> tuple[PerfResult, PerfResult, PerfResult, PerfResult]:
     """Run one direct-I/O `elbencho` write pass immediately followed by one
     read pass across every OST in a pool at once, returning
@@ -679,6 +730,9 @@ def pool_rw_check(
     If `oss_hosts` is given, their page cache is dropped between the write
     and read passes (see `drop_oss_caches`), so the read measures real disk
     I/O instead of data served back out of OSS-side RAM.
+
+    If `results_dir` is given, raw elbencho output for both passes is saved
+    there as `pool_<pool_label>_<write|read>.csv`/`.log`.
     """
     pool_kwargs = dict(pool=pool_label if pool_label != "(unpooled)" else None, scope="pool")
     indices = _group_ost_indices(targets)
@@ -703,7 +757,8 @@ def pool_rw_check(
 
     try:
         write_rate, write_lat_us, read_rate, read_lat_us = _write_then_read(
-            pool_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts, oss_hosts
+            pool_dir, threads, size, block_size, runtime, elbencho_path, timeout, hosts, oss_hosts,
+            results_dir, f"pool_{pool_label}",
         )
     except (shell.CommandError, ElbenchoError) as exc:
         return _fail_quad(f"pool:{pool_label}", f"elbencho failed: {exc}", **pool_kwargs)
@@ -738,6 +793,7 @@ def run_perf_checks(
     oss_hosts: list[str] | None = None,
     stripe_count: int | None = None,
     stripe_size: str | None = None,
+    results_dir: str | None = None,
     on_result: Callable[[tuple[PerfResult, PerfResult, PerfResult, PerfResult]], None] | None = None,
 ) -> list[PerfResult]:
     """Run one write+read throughput/latency check against every OST in the
@@ -784,6 +840,10 @@ def run_perf_checks(
     default stripe size) for both per-OST and per-pool checks -- see
     `ost_rw_check`/`pool_rw_check` for what the defaults mean for each.
 
+    If `results_dir` is given, the raw elbencho CSV output and a `.log`
+    file for every check's write and read passes are saved there (see
+    `ost_rw_check`/`pool_rw_check`), instead of being discarded.
+
     If `on_result` is given, it's called with each check's 4-tuple of
     results (write throughput/latency, read throughput/latency) as soon as
     that check finishes, so a caller can stream results instead of waiting
@@ -818,7 +878,7 @@ def run_perf_checks(
                 warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
                 warn_ms=th.warn_ms, fail_ms=th.fail_ms,
                 elbencho_path=elbencho_path, threads=threads, hosts=hosts, oss_hosts=oss_hosts,
-                stripe_count=stripe_count, stripe_size=stripe_size,
+                stripe_count=stripe_count, stripe_size=stripe_size, results_dir=results_dir,
             )
             for result in quad:
                 result.pool = target.pool
@@ -840,7 +900,7 @@ def run_perf_checks(
                 warn_mbps=th.warn_mbps, fail_mbps=th.fail_mbps,
                 warn_ms=th.warn_ms, fail_ms=th.fail_ms,
                 elbencho_path=elbencho_path, threads=threads, hosts=hosts, oss_hosts=oss_hosts,
-                stripe_count=stripe_count, stripe_size=stripe_size,
+                stripe_count=stripe_count, stripe_size=stripe_size, results_dir=results_dir,
             )
             results.extend(quad)
             if on_result:

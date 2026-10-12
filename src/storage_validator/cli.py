@@ -161,6 +161,16 @@ def _parse_pool_threshold(raw: str) -> tuple[str, PerfThresholds]:
         "1m, 4m). Defaults to the filesystem's own default stripe size."
     ),
 )
+@click.option(
+    "--results-dir",
+    default=None,
+    type=click.Path(file_okay=False),
+    help=(
+        "Save raw elbencho CSV output and .log files (command line + "
+        "stdout/stderr) for every check's write and read passes into "
+        "this directory. Defaults to not saving these."
+    ),
+)
 @click.option("--json", "json_path", default=None, type=click.Path(dir_okay=False), help="Write the JSON report to this path.")
 @click.option("--quiet", is_flag=True, default=False, help="Suppress the console table output.")
 def main(
@@ -190,6 +200,7 @@ def main(
     oss_hosts_file: str | None,
     stripe_count: int | None,
     stripe_size: str | None,
+    results_dir: str | None,
     json_path: str | None,
     quiet: bool,
 ) -> None:
@@ -228,6 +239,7 @@ def main(
             oss_hosts=parsed_oss_hosts or None,
             stripe_count=stripe_count,
             stripe_size=stripe_size,
+            results_dir=results_dir,
         ),
     )
 

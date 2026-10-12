@@ -61,5 +61,6 @@ class LustreBackend(StorageBackend):
             oss_hosts=cfg.oss_hosts,
             stripe_count=cfg.stripe_count,
             stripe_size=cfg.stripe_size,
+            results_dir=cfg.results_dir,
             on_result=on_result,
         )
