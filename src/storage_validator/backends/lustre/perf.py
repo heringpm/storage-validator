@@ -8,6 +8,12 @@ latency ("IO lat us [max]") from each pass's CSV output -- there is no
 separate latency-only test, and the write pass's data is reused for the
 read pass instead of writing it twice.
 
+elbencho's "MiB/s [last]" is binary mebibytes/sec (1 MiB = 1,048,576
+bytes), but results are reported here as decimal "MB/s" (1 MB =
+1,000,000 bytes) to match how storage dashboards/vendors typically report
+throughput -- so the raw elbencho number is multiplied by
+1,048,576 / 1,000,000 (~1.048576) before being stored in `PerfResult`.
+
 Scratch files live under a persistent `.storageval/` directory tree at the
 root of the mount, laid out as:
 
@@ -472,7 +478,12 @@ def _run_elbencho_rw(
                 f"parsed row: {row!r}"
             )
         try:
-            rate = float(row["MiB/s [last]"])
+            # elbencho reports binary mebibytes/sec (1 MiB = 1,048,576 bytes),
+            # but we display/label this as "MB/s" (decimal megabytes/sec,
+            # 1 MB = 1,000,000 bytes) to match how storage dashboards and
+            # vendors typically report throughput. Convert here so the two
+            # numbers agree, rather than understating throughput by ~4.86%.
+            rate = float(row["MiB/s [last]"]) * (1024.0 * 1024.0 / 1_000_000.0)
             lat_max_us = float(row["IO lat us [max]"])
             # "IO lat us [avg]" may be missing on older elbencho versions;
             # fall back to the max so avg latency is still populated rather
